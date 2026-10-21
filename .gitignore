@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.bak
+backups/
+~/
+validation/
+bin/*.bak
+.DS_Store
+# makineye/projeye ozel (yerelde kalir)
+KURULUM-RAPORU.md
+GOREV-SURECI-IYILESTIRME.md
+HIZ-VE-LIMIT.md
+projects.json
+bin/swap_runner_after_tester.sh

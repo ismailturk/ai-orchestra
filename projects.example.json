@@ -1,0 +1,12 @@
+{
+  "my-app": {
+    "root": "/home/me/work/my-app",
+    "backend": "/home/me/work/my-api",
+    "ownership": "full-stack; DB human-only"
+  },
+  "my-mobile": {
+    "root": "/home/me/work/my-mobile",
+    "backend_reference": "/home/me/work/my-api",
+    "ownership": "mobile-only; backend read-only"
+  }
+}
