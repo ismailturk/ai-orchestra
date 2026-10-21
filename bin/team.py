@@ -273,6 +273,100 @@ def snapshot(root, skip_tests=False, scope=None):
                         digest.update(block)
     return digest.hexdigest()
 
+# Coordination files are never part of a task's source change set.
+COORD_DIRS = ('.ai/', 'tasks/', 'roles/')
+CLOSED_STAGES = ('DONE', 'CLOSED', 'ABANDONED')
+
+def git_changes(root):
+    """{path: content hash} of every dirty/untracked file under root, paths relative to root; {} without git."""
+    r = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
+                       capture_output=True)
+    pre = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-prefix'], capture_output=True, text=True)
+    if r.returncode or pre.returncode:
+        return {}
+    prefix, out = pre.stdout.strip(), {}
+    items = r.stdout.decode(errors='replace').split('\0')
+    i = 0
+    while i < len(items):
+        entry = items[i]; i += 1
+        if len(entry) < 4:
+            continue
+        paths = [entry[3:]]
+        if entry[0] in 'RC':  # rename/copy: the next entry is the old path
+            paths.append(items[i]); i += 1
+        for path in paths:
+            rel = path[len(prefix):] if path.startswith(prefix) else None
+            if not rel or rel.startswith(COORD_DIRS):
+                continue
+            f = root / rel
+            # ponytail: hashes every dirty file each time; fine unless huge untracked trees are not gitignored.
+            out[rel] = hashlib.sha256(f.read_bytes()).hexdigest() if f.is_file() and not f.is_symlink() else '-'
+    return out
+
+def add_changed(p, s, before, after):
+    """Accumulate files whose dirty content differs between two git_changes() snapshots (task scope only)."""
+    files = {f for f in before.keys() | after.keys() if before.get(f) != after.get(f)}
+    scope = task_scope(p)
+    if scope:
+        res = [glob_re(g) for g in scope]
+        files = {f for f in files if any(r.match(f) for r in res)}
+    s['changed_files'] = sorted(set(s.get('changed_files') or []) | files)
+    return s['changed_files']
+
+def claim_baseline(root, ident):
+    return root / '.ai' / 'runner-logs' / ident / 'claim-baseline.json'
+
+def task_title(p, s):
+    f = p / 'TASK.md'
+    head = next((l[2:] for l in (f.read_text().splitlines() if f.is_file() else []) if l.startswith('# ')), '')
+    head = head.replace(p.name, '', 1).strip(' -—:')
+    return s.get('title') or p.name if head in ('', 'TASK') else head
+
+def git(root, *args):
+    return subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
+
+def commit(root, ident, apply=False, force=False):
+    """Per-task commit proposal; DRY-RUN unless apply. Never pushes."""
+    p = task(root, ident); s = read(p / 'state.json')
+    dirty = git_changes(root)
+    files = [f for f in s.get('changed_files') or [] if f in dirty]
+    msg = f'{ident}: {task_title(p, s)}'
+    out = []
+    closed = s['stage'] in ('DONE', 'CLOSED')
+    if not closed:
+        out.append(f'UYARI: görev {s["stage"]} aşamasında (DONE/CLOSED değil); --apply için --force gerekir.')
+    if not files:
+        return '\n'.join(out + ['Commit edilecek değişiklik yok (changed_files boş ya da dosyalar temiz).'])
+    out += ['Dosyalar:'] + ['  ' + f for f in files]
+    for other in sorted((root / 'tasks').glob('*/state.json')):
+        if other.parent.name == ident:
+            continue
+        try: o = read(other)
+        except (OSError, ValueError): continue
+        both = sorted(set(files) & set(o.get('changed_files') or []))
+        if both and o.get('stage') not in CLOSED_STAGES:
+            out.append(f'UYARI: açık görev {other.parent.name} aynı dosyalara dokundu: ' + ', '.join(both))
+    cmds = [['git', '-C', str(root), 'add', '--', *files], ['git', '-C', str(root), 'commit', '-m', msg]]
+    out += ['Mesaj: ' + msg, 'Komutlar:'] + ['  ' + shlex.join(c) for c in cmds]
+    if not apply:
+        return '\n'.join(out + ['DRY-RUN: hiçbir şey çalıştırılmadı; uygulamak için --apply (push yapılmaz).'])
+    if not closed and not force:
+        raise ValueError('Görev DONE/CLOSED değil; yine de commit için --force ver.')
+    staged = git(root, 'diff', '--cached', '--name-only', '--relative')
+    extra = sorted(set(staged.stdout.split()) - set(files))
+    if staged.returncode or extra:
+        raise ValueError('Başka staged değişiklik var, commit yapılmadı: ' + ', '.join(extra or ['git hatası']))
+    for c in cmds:
+        r = subprocess.run(c, capture_output=True, text=True)
+        if r.returncode:
+            raise ValueError('git başarısız: ' + (r.stderr or r.stdout).strip())
+    head = git(root, 'rev-parse', 'HEAD').stdout.strip()
+    with locked(root):
+        s = read(p / 'state.json')
+        s.update(commit=head, updated=now(), revision=s.get('revision', 0) + 1)
+        atomic(p / 'state.json', s)
+    return '\n'.join(out + ['Commit: ' + head + ' (push yok)'])
+
 def knowledge_hashes(root):
     return {p.name:hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted((root/'.ai').glob('*.md'))}
@@ -476,6 +570,7 @@ def main():
     q=sub.add_parser('resolve-gate'); q.add_argument('id'); q.add_argument('gate_id'); q.add_argument('--user-message-ref',required=True); q.add_argument('--outcome',choices=['cancelled','user-applied','explicitly-approved'],required=True)
     q=sub.add_parser('launch'); q.add_argument('role',choices=ROLES); q.add_argument('--task'); q.add_argument('--dry-run',action='store_true'); q.add_argument('--instruction')
     q=sub.add_parser('automate'); q.add_argument('id'); mode=q.add_mutually_exclusive_group(required=True); mode.add_argument('--enable',action='store_true'); mode.add_argument('--disable',action='store_true'); mode.add_argument('--resume',action='store_true')
+    q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
     sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
     args=a.parse_args()
     if args.cmd=='init': print(init_project(args.path or args.project,args.dry_run)); return
@@ -486,6 +581,7 @@ def main():
         print('\n'.join(lines)); sys.exit(0 if good else 1)
     root=project(args.project)
     if args.cmd=='new': print(create(root,args.id,args.title,args.profile,args.auto)); return
+    if args.cmd=='commit': print(commit(root,args.id,args.apply,args.force)); return
     if args.cmd=='launch': print(launch(root,args.role,args.task,args.dry_run,args.instruction)); return
     if args.cmd=='message': print(json.dumps(message(root,args.id,args.sender,args.to,args.body),ensure_ascii=False)); return
     if args.cmd=='inbox':
@@ -530,9 +626,13 @@ def main():
             if s['stage']!='IMPLEMENTATION': raise ValueError('Not implementation stage.')
             if lock_conflict(root,task_scope(p)): raise ValueError('Another developer source lock is active.')
             s['developer']={'session':args.session,'at':now()}
+            atomic(claim_baseline(root,p.name),git_changes(root))
         elif args.cmd=='release':
             if not s['developer'] or s['developer']['session']!=args.session: raise ValueError('Lock belongs to another session.')
             s['developer']=None
+            base=claim_baseline(root,p.name)
+            if base.is_file():
+                add_changed(p,s,read(base),git_changes(root)); base.unlink()
         elif args.cmd=='evidence': evidence(root,p,s,args.role,args.result,args.session,args.note)
         elif args.cmd=='knowledge':
             if s['stage']!='KNOWLEDGE_UPDATE': raise ValueError('Wrong stage.')

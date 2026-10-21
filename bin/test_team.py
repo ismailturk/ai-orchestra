@@ -559,6 +559,36 @@ class TeamTests(unittest.TestCase):
         self.cli('automate','RW-1','--resume')
         self.assertEqual(team.read(p/'state.json')['rework_count'],0)
 
+    def git_repo(self):
+        env={'GIT_AUTHOR_NAME':'t','GIT_AUTHOR_EMAIL':'t@example.com','GIT_COMMITTER_NAME':'t','GIT_COMMITTER_EMAIL':'t@example.com'}
+        patcher=patch.dict('os.environ',env);patcher.start();self.addCleanup(patcher.stop)
+        g=lambda *a: subprocess.run(['git','-C',str(self.root),*a],capture_output=True,text=True,check=True).stdout
+        g('init','-q');g('add','-A');g('commit','-qm','init')
+        return g
+
+    def test_changed_files_and_commit_dry_run_apply_cli(self):
+        g=self.git_repo()
+        p=team.create(self.root,'CM-1','Commit fixture','small');self.cli('advance','CM-1','IMPLEMENTATION')
+        (self.root/'preexisting.txt').write_text('other task dirt')  # dirty before claim: not ours
+        self.cli('claim','CM-1','--session','s1')
+        (self.root/'source.txt').write_text('v2');(self.root/'new.txt').write_text('n')
+        (self.root/'.ai/scratch.md').write_text('coordination')
+        self.cli('release','CM-1','--session','s1')
+        self.assertEqual(team.read(p/'state.json')['changed_files'],['new.txt','source.txt'])
+        o=team.create(self.root,'CM-2','other','small');s=team.read(o/'state.json');s['changed_files']=['source.txt'];team.atomic(o/'state.json',s)
+        out=self.cli('commit','CM-1').stdout
+        self.assertIn('DRY-RUN',out);self.assertIn('UYARI: açık görev CM-2',out);self.assertIn('CM-1: Commit fixture',out)
+        self.assertIn('UYARI: görev IMPLEMENTATION',out);self.assertEqual(g('log','--oneline').count('\n'),1)
+        self.cli('commit','CM-1','--apply',ok=False)  # not DONE without --force
+        g('add','preexisting.txt')
+        self.assertIn('staged',self.cli('commit','CM-1','--apply','--force',ok=False).stderr)
+        g('reset','-q','preexisting.txt')
+        self.cli('commit','CM-1','--apply','--force')
+        self.assertEqual(g('show','--name-only','--format=').split(),['new.txt','source.txt'])
+        self.assertEqual(team.read(p/'state.json')['commit'],g('rev-parse','HEAD').strip())
+        self.assertIn('preexisting.txt',g('status','--porcelain'))
+        self.assertIn('Commit edilecek değişiklik yok',self.cli('commit','CM-1').stdout)
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:

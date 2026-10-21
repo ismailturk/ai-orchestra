@@ -229,6 +229,15 @@ def restore_missing_canonical_reports(root, ident, snapshot_dir):
     return restored
 
 
+def record_changes(root, ident, before):
+    """Add the files this Developer run touched to the task's changed_files."""
+    after = team.git_changes(root)
+    with team.locked(root):
+        p, state = load_state(root, ident)
+        team.add_changed(p, state, before, after)
+        team.atomic(p / 'state.json', state)
+
+
 def notify(title, body):
     if not os.environ.get('CMUX_WORKSPACE_ID') or not Path(CMUX).is_file():
         return
@@ -618,11 +627,14 @@ def run_task(root, ident, state, role, dry_run=False,
     if session_id:
         save_session(root, ident, role, provider, session_id, run_id)
     stamp(f'{ident}: {role} başladı · {stage}')
+    before = team.git_changes(root) if role == 'developer' else None
     try:
         code, discovered_session, log_path = run_process(
             root, ident, role, command, run_id, turn_warning_seconds, idle_seconds,
             status_seconds)
     finally:
+        if before is not None:
+            record_changes(root, ident, before)
         # A deleted canonical report is restored even when the role process itself fails.
         restored = restore_missing_canonical_reports(root, ident, snapshot_dir)
         if restored:
