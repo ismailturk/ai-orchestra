@@ -33,6 +33,8 @@ WORKFLOWS = {
     # Each profile owns its list; a shared object could be mutated through one profile.
     'full': list(STAGES),
     'risky': list(STAGES),
+    # One-tester bug fix: no verifier/lead; escalates to `small` when it touches risk_paths.
+    'fix': ['NEW', 'IMPLEMENTATION', 'TEST_CLAUDE', 'DONE'],
 }
 MAX_REWORKS = 3
 ROOT = Path(__file__).resolve().parent.parent
@@ -368,8 +370,39 @@ def commit(root, ident, apply=False, force=False):
     return '\n'.join(out + ['Commit: ' + head + ' (push yok)'])
 
 def knowledge_hashes(root):
+    # CHANGELOG.md is appended by every closing fix task; it must not invalidate other tasks' knowledge ack.
     return {p.name:hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted((root/'.ai').glob('*.md'))}
+            for p in sorted((root/'.ai').glob('*.md')) if p.name!='CHANGELOG.md'}
+
+def runner_json(root):
+    """Optional .ai/runner.json; {} when missing or unreadable."""
+    try: return read(root/'.ai/runner.json')
+    except (OSError,ValueError): return {}
+
+def risk_files(root, files):
+    res=[glob_re(g) for g in runner_json(root).get('risk_paths') or []]
+    return [f for f in files if any(r.match(f) for r in res)]
+
+UI_WORDS=re.compile(r'\b(tasarım|tasarim|ekran|ui)\b',re.I)
+
+def suggest_profile(root, p=None, title=''):
+    """(profile, reason) for `--profile auto`."""
+    text=title+'\n'+((p/'TASK.md').read_text() if p and (p/'TASK.md').is_file() else '')
+    if UI_WORDS.search(text): return 'ui','TASK.md/başlık tasarım/ekran/UI içeriyor'
+    scope=task_scope(p) if p else None
+    risk=runner_json(root).get('risk_paths') or []
+    if not scope: return 'small','## Dosyalar kapsamı yok'
+    if len(scope)>3: return 'small',f'kapsam {len(scope)} glob (>3)'
+    if risk and scopes_conflict(scope,risk): return 'small','kapsam risk_paths ile kesişiyor'
+    return 'fix',f'kapsam {len(scope)} glob, risk_paths dışı'
+
+def append_changelog(root, s):
+    f=root/'.ai/CHANGELOG.md'
+    result=(s.get('claude_test') or {}).get('result','?')
+    line=f"- {now()[:10]} {s['task']} — {s.get('title','')} — {result}\n"
+    with f.open('a') as h:
+        if h.tell()==0: h.write('# CHANGELOG\n\n')
+        h.write(line)
 
 def reclassification_stage(state, new_path):
     """Keep completed workflow work when the new profile can represent it."""
@@ -386,8 +419,16 @@ def reclassification_stage(state, new_path):
         earlier=[]
     return next((stage for stage in reversed(earlier) if stage in new_path),new_path[0])
 
-def create(root, ident, title, profile='full', auto=False):
+def create(root, ident, title, profile='full', auto=False, files=None):
     ident = slug(ident)
+    choice = None
+    if profile == 'auto':
+        scratch = Path(tempfile.mkdtemp())
+        try:
+            if files: (scratch/'TASK.md').write_text('## Dosyalar\n' + ''.join(f'- {g}\n' for g in files))
+            profile, reason = suggest_profile(root, scratch, title)
+        finally: shutil.rmtree(scratch)
+        choice = {'profile': profile, 'reason': reason}
     if profile not in WORKFLOWS:
         raise ValueError('Unknown workflow profile: '+profile)
     with locked(root):
@@ -396,8 +437,9 @@ def create(root, ident, title, profile='full', auto=False):
         for doc in DOCS:
             content=(ROOT/'templates/task'/ (doc+'.md')).read_text()
             content=content.replace('{{TASK_ID}}',ident).replace('{{TITLE}}',title).replace('{{PROFILE}}',profile)
+            if doc == 'TASK' and files: content = content.rstrip('\n') + '\n' + ''.join(f'- {g}\n' for g in files)
             (p / (doc+'.md')).write_text(content)
-        atomic(p/'state.json', {'task':ident,'title':title,'profile':profile,
+        atomic(p/'state.json', {**({'profile_choice': choice} if choice else {}),'task':ident,'title':title,'profile':profile,
                'stage_path':WORKFLOWS[profile],'stage':'NEW','created':now(),
                'updated':now(),'revision':0,'developer':None,'gates':[],'gate_history':[],
                'claude_test':None,'codex_verify':None,'knowledge':None,
@@ -454,10 +496,17 @@ def advance(root,p,s,stage):
         # are excluded: every test stage adds its own, and requiring the whole tree to
         # stay byte-identical made the later stages impossible to satisfy.
         fp=production_snapshot(root,task_scope(p))
-        for key,file in [('claude_test','TEST_CLAUDE.md')]+([('codex_verify','VERIFY_CODEX.md')] if stage!='VERIFY_CODEX' else []):
+        for key,file in [('claude_test','TEST_CLAUDE.md')]+([('codex_verify','VERIFY_CODEX.md')] if stage!='VERIFY_CODEX' and 'VERIFY_CODEX' in path else []):
             e=s[key]
             if not e or e['result']!='PASS' or e.get('production_fingerprint',e['fingerprint'])!=fp or e['report_sha256']!=hashlib.sha256((p/file).read_bytes()).hexdigest():
                 raise ValueError('Missing, failed or stale evidence: '+key)
+    if stage=='DONE' and s.get('profile')=='fix':
+        risky=risk_files(root,s.get('changed_files') or [])
+        if risky:
+            # A fix that touched risk_paths gets the independent verifier and knowledge stages of `small`.
+            s.update(profile='small',stage_path=WORKFLOWS['small'],stage='VERIFY_CODEX',
+                     escalated={'reason':'risk_paths','files':risky,'at':now()})
+            return
     if stage=='DONE':
         if any(g['status']!='RESOLVED_BY_LEAD' for g in s['gates']):
             raise ValueError('Unresolved human gate.')
@@ -468,9 +517,12 @@ def advance(root,p,s,stage):
         if 'KNOWLEDGE_UPDATE' in path:
             if not s['knowledge'] or s['knowledge']['fingerprint']!=snapshot(root,scope=task_scope(p)) or s['knowledge']['documents']!=knowledge_hashes(root):
                 raise ValueError('Knowledge update acknowledgement required on same source.')
-        if 'STATUS: NOT_RUN' in (p/'FINAL_REPORT.md').read_text():
+        if 'VERIFY_CODEX' in path and 'STATUS: NOT_RUN' in (p/'FINAL_REPORT.md').read_text():
             raise ValueError('Final report is not written.')
     s['stage']=stage
+    if stage=='DONE':
+        s['done_at']=now()
+        if s.get('profile')=='fix': append_changelog(root,s)
 
 def role_prompt(root, role, ident=None):
     # Project-specific rules live in .ai/runner.json -> "role_prompt_extra" (optional string).
@@ -555,13 +607,13 @@ def main():
     a=argparse.ArgumentParser(description=__doc__)
     a.add_argument('--project',default=os.getcwd())
     sub=a.add_subparsers(dest='cmd',required=True)
-    q=sub.add_parser('new'); q.add_argument('id'); q.add_argument('title'); q.add_argument('--profile',choices=WORKFLOWS,default='full'); q.add_argument('--auto',action='store_true')
+    q=sub.add_parser('new'); q.add_argument('id'); q.add_argument('title'); q.add_argument('--profile',choices=[*WORKFLOWS,'auto'],default='full'); q.add_argument('--auto',action='store_true'); q.add_argument('--files',action='append',help='## Dosyalar globu (tekrarlanabilir)')
     q=sub.add_parser('status'); q.add_argument('id',nargs='?')
     q=sub.add_parser('message'); q.add_argument('id'); q.add_argument('--from',dest='sender',choices=ROLES,required=True); q.add_argument('--to',choices=ROLES,required=True); q.add_argument('--body',required=True)
     q=sub.add_parser('inbox'); q.add_argument('role',choices=ROLES); q.add_argument('--task')
     q=sub.add_parser('advance'); q.add_argument('id'); q.add_argument('stage',choices=STAGES)
     q=sub.add_parser('rework'); q.add_argument('id'); q.add_argument('--reason',required=True)
-    q=sub.add_parser('reclassify'); q.add_argument('id'); q.add_argument('profile',choices=WORKFLOWS); q.add_argument('--reason',required=True)
+    q=sub.add_parser('reclassify'); q.add_argument('id'); q.add_argument('profile',choices=[*WORKFLOWS,'auto']); q.add_argument('--reason',required=True)
     q=sub.add_parser('claim'); q.add_argument('id'); q.add_argument('--session',required=True)
     q=sub.add_parser('release'); q.add_argument('id'); q.add_argument('--session',required=True)
     q=sub.add_parser('evidence'); q.add_argument('id'); q.add_argument('--role',choices=['tester','verifier'],required=True); q.add_argument('--result',choices=['PASS','FAIL','BLOCKED'],required=True); q.add_argument('--session',required=True); q.add_argument('--note',required=True)
@@ -580,7 +632,11 @@ def main():
         lines,good=doctor(pr if (pr/'.ai/PROJECT.md').is_file() else None)
         print('\n'.join(lines)); sys.exit(0 if good else 1)
     root=project(args.project)
-    if args.cmd=='new': print(create(root,args.id,args.title,args.profile,args.auto)); return
+    if args.cmd=='new':
+        p=create(root,args.id,args.title,args.profile,args.auto,args.files)
+        c=read(p/'state.json').get('profile_choice')
+        if c: print(f"Profil: {c['profile']} (auto) — {c['reason']}")
+        print(p); return
     if args.cmd=='commit': print(commit(root,args.id,args.apply,args.force)); return
     if args.cmd=='launch': print(launch(root,args.role,args.task,args.dry_run,args.instruction)); return
     if args.cmd=='message': print(json.dumps(message(root,args.id,args.sender,args.to,args.body),ensure_ascii=False)); return
@@ -608,6 +664,9 @@ def main():
         elif args.cmd=='reclassify':
             if s['developer']: raise ValueError('Release developer lock first.')
             old=s.get('profile','full')
+            if args.profile=='auto':
+                args.profile,why=suggest_profile(root,p,s.get('title',''))
+                print(f'Profil: {args.profile} (auto) — {why}')
             new_path=WORKFLOWS[args.profile]
             # Preserve the current checkpoint, or the nearest earlier one shared by both profiles.
             next_stage=reclassification_stage(s,new_path)

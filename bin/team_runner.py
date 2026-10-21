@@ -344,7 +344,7 @@ def role_model(root, state, role):
     if not f.is_file():
         return 'sonnet' if role in {'analyst', 'designer', 'lead'} else None
     models = team.read(f)
-    if role == 'developer' and state.get('profile') in {'tweak', 'small'} and models.get('developer_small'):
+    if role == 'developer' and state.get('profile') in {'tweak', 'small', 'fix'} and models.get('developer_small'):
         return models['developer_small']
     return models.get(role)
 
@@ -644,6 +644,9 @@ def run_task(root, ident, state, role, dry_run=False,
     if discovered_session:
         save_session(root, ident, role, provider, discovered_session, run_id)
     _, after = load_state(root, ident)
+    if after.get('escalated') and not state.get('escalated'):
+        esc = after['escalated']
+        stamp(f'{ident}: YÜKSELTİLDİ · fix → small (risk_paths: {", ".join(esc.get("files") or [])}); VERIFY_CODEX eklendi')
     failed = code != 0 or after['stage'] == stage
     retry_at = limit_retry(log_path) if failed else None
     if retry_at:

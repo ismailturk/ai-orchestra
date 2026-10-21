@@ -589,6 +589,42 @@ class TeamTests(unittest.TestCase):
         self.assertIn('preexisting.txt',g('status','--porcelain'))
         self.assertIn('Commit edilecek değişiklik yok',self.cli('commit','CM-1').stdout)
 
+    def test_fix_profile_done_changelog_and_risk_escalation(self):
+        self.assertEqual(team.WORKFLOWS['fix'],['NEW','IMPLEMENTATION','TEST_CLAUDE','DONE'])
+        p=team.create(self.root,'FX-1','Fix typo','fix');s=team.read(p/'state.json')
+        team.advance(self.root,p,s,'IMPLEMENTATION');team.advance(self.root,p,s,'TEST_CLAUDE')
+        with self.assertRaises(ValueError):team.advance(self.root,p,s,'DONE')  # tester PASS required
+        self.pass_report('tester','claude-fix',p,s)
+        team.advance(self.root,p,s,'DONE')  # no verifier, knowledge or final report needed
+        self.assertEqual(s['stage'],'DONE');self.assertIn('done_at',s)
+        log=(self.root/'.ai/CHANGELOG.md').read_text()
+        self.assertIn('FX-1 — Fix typo — PASS',log);self.assertEqual(log.count('FX-1'),1)
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/core/**']}))
+        p=team.create(self.root,'FX-2','Risky fix','fix');s=team.read(p/'state.json')
+        team.advance(self.root,p,s,'IMPLEMENTATION');team.advance(self.root,p,s,'TEST_CLAUDE')
+        s['changed_files']=['lib/core/a.dart','README.md']
+        self.pass_report('tester','claude-fix2',p,s)
+        team.advance(self.root,p,s,'DONE')
+        self.assertEqual((s['stage'],s['profile']),('VERIFY_CODEX','small'))
+        self.assertEqual(s['escalated']['files'],['lib/core/a.dart'])
+        self.pass_report('verifier','codex-fix2',p,s)  # Claude PASS carried into the verifier stage
+        team.advance(self.root,p,s,'KNOWLEDGE_UPDATE')
+        self.assertNotIn('FX-2',(self.root/'.ai/CHANGELOG.md').read_text())
+
+    def test_profile_auto_choice_and_reason_cli(self):
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/core/**']}))
+        out=self.cli('new','AU-1','Fix null check','--profile','auto','--files','lib/a/**').stdout
+        self.assertIn('Profil: fix (auto)',out)
+        s=team.read(self.root/'tasks/AU-1/state.json');self.assertEqual(s['stage_path'],team.WORKFLOWS['fix'])
+        self.assertIn('- lib/a/**',(self.root/'tasks/AU-1/TASK.md').read_text())
+        self.assertIn('Profil: small',self.cli('new','AU-2','x','--profile','auto','--files','lib/core/x/**').stdout)
+        self.assertIn('Profil: small',self.cli('new','AU-3','x','--profile','auto').stdout)
+        self.assertIn('Profil: small',self.cli('new','AU-4','x','--profile','auto',*sum([['--files',f'g{i}/**'] for i in range(4)],[])).stdout)
+        self.assertIn('Profil: ui',self.cli('new','AU-5','Yeni ekran','--profile','auto','--files','lib/a/**').stdout)
+        self.assertEqual(team.read(self.p/'state.json')['profile'],'full')  # default unchanged
+        (self.p/'TASK.md').write_text('## Dosyalar\n- lib/b/**\n')
+        self.assertIn('Profil: fix',self.cli('reclassify','DEMO-001','auto','--reason','auto').stdout)
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:
