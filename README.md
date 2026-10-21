@@ -6,7 +6,7 @@ Claude Code ve Codex ile rol tabanlı, dosya tabanlı yazılım geliştirme orke
 
 ## Ne yapar
 - **Roller:** Lead (tek kullanıcı teması, kod yazmaz), Analyst, Designer, Developer (tek kaynak yazarı, kilitli), Tester, Verifier/Reporter (bağımsız ikinci doğrulama; Codex veya `TEAM_VERIFIER_ENGINE=claude`).
-- **Aşamalar ve profiller:** `tweak`, `small`, `ui`, `full`, `risky`. Aşamalar: NEW, ANALYSIS, DESIGN, IMPLEMENTATION, TEST_CLAUDE, VERIFY_CODEX, KNOWLEDGE_UPDATE, DONE.
+- **Aşamalar ve profiller:** `fix`, `tweak`, `small`, `ui`, `full`, `risky`. Aşamalar: NEW, ANALYSIS, DESIGN, IMPLEMENTATION, TEST_CLAUDE, VERIFY_CODEX, KNOWLEDGE_UPDATE, DONE.
 - **Kanıt kapıları:** test sonuçları kaynak parmak izine bağlıdır; kaynak değişirse eski kanıt geçersizdir. Test PASS ve bağımsız doğrulama PASS olmadan DONE olmaz.
 - **Paralel runner:** `team-runner` `--auto` görevleri sırayla/paralel yürütür; TASK.md `## Dosyalar` kapsamı kesişmeyen görevler ayrı kilitle aynı anda çalışır.
 - **Limit bekleme:** limit/ağ hatasında görev `WAITING_LIMIT` olur ve `retry_at`'te aynı aşamadan sürer.
@@ -45,21 +45,40 @@ team evidence ID --role tester|verifier --result PASS|FAIL|BLOCKED --session S -
 team rework ID --reason "..."   team reclassify ID PROFIL --reason "..."
 team knowledge ID --summary "..."   team gate ID --kind DB|HIGH_IMPACT|UNKNOWN_IMPACT ...
 team automate ID --resume|--disable
+team close ID --reason "..." [--abandon]     # CLOSED / ABANDONED: tam akış olmadan kapat
+team commit ID [--apply] [--force]           # görev başı commit taslağı; varsayılan DRY-RUN, push yok
+team status [--all]                          # gruplu özet; --all eski tam JSON
+team report [--days N] [--task ID]           # süre, token/maliyet, rework, müdahale, bağımsızlık
+team metrics backfill                        # eski runner log'larından metrics.jsonl doldur (idempotent)
+team dashboard [--project P ...|--all] [--out yol] [--open] [--serve PORT]
+team budget [--resume [--task ID]]
 team-runner --project /yol/proje watch | status
+team-runner install-agent --project /yol/proje [--dry-run]   # launchd/systemd dosyası yazar, komutu yazdırır
+team-runner uninstall-agent --project /yol/proje [--apply]
 ```
 Tüm komutlar `--project <yol>` ile veya proje klasöründen çalışır; ayrıntı için `team --help`.
 
 ## Yapılandırma (proje içinde, hepsi isteğe bağlı)
 - `.ai/models.json`: rol -> model (`developer_small` tweak/small için).
 - `.ai/runner.json`: `max_parallel`, `serial_roles`; ayrıca `role_prompt_extra` (tüm rol istemlerine eklenen projeye özel kurallar), `codex_model`, `env` ve `env_by_role` (rol süreçlerine ek ortam değişkenleri).
+- `.ai/runner.json` yeni anahtarlar: `risk_paths` (glob listesi; `fix` görevi bunlara dokunursa `small` akışına yükselir), `require_independent_verifier` (true: `fix` dışında tek motorlu PASS/PASS DONE olmaz), `budget` (`daily_usd`, `weekly_usd`, `task_usd`, `action`: `warn`|`pause`; null = kapalı).
 - TASK.md `## Dosyalar`: satır başına bir glob; kanıt/parmak izi yalnız bu dosyalardan hesaplanır, kesişmeyen görevler paralel çalışır. Bölüm yoksa görev tüm repoyu kapsar.
+
+## Hızlı düzeltme, commit, ölçüm
+- **`fix` profili:** NEW → IMPLEMENTATION → TEST_CLAUDE → DONE. Yalnız Tester PASS ister; Lead/Verifier çalışmaz, DONE'da `.ai/CHANGELOG.md`'ye tek satır yazılır. Değişen dosya `risk_paths`'e değerse görev kendiliğinden `small` olur ve VERIFY_CODEX'ten geçer (`escalated`). `team new ... --profile auto [--files GLOB ...]` (veya `team reclassify ID auto`) kapsama göre `fix`/`small`/`ui` önerir ve nedenini yazar.
+- **Görev başı commit:** runner her Developer çalışmasında (ve elle `claim`→`release` arasında) değişen dosyaları `changed_files`'a biriktirir (`.ai/`, `tasks/`, `roles/` hariç; kapsam varsa yalnız kapsam). `team commit ID` dosyaları, açık görev çakışmalarını, önerilen mesajı ve git komutlarını gösterir; `--apply` yalnız o dosyaları commit eder (başka staged değişiklik varsa durur), push etmez.
+- **Bağımsızlık:** kanıt kaydı gerçek motoru (`engine_id`: claude|codex|other) ve modeli tutar. Kapanışta `PASS/PASS (bağımsız)` ya da `PASS (tek model)` yazılır.
+- **Ölçüm:** runner her rol çalışması için `.ai/metrics.jsonl`'e süre, sonuç, token (input/output/cache read/cache write) ve Claude maliyetini yazar; elle müdahaleler `type: intervention`. Codex log'u token verir, maliyet vermez. `team dashboard` dış kaynaksız tek HTML üretir (varsayılan `.ai/dashboard.html`); `--serve` yalnız 127.0.0.1'de her istekte yeniden üretir.
+- **Bütçe:** `warn` %80/%100'de runner log'una ve `team status` başına uyarı yazar; `pause` %100'de yeni rol başlatmaz (çalışanı kesmez), `team budget --resume` o günü açar. Görev bütçesi aşılırsa görev `AWAITING_USER` olur (`team budget --resume --task ID`).
+- **Arka plan runner:** `install-agent` macOS'ta `~/Library/LaunchAgents/com.ai-orchestra.runner.<id>.plist`, Linux'ta systemd user unit yazar; `launchctl`/`systemctl` komutunu sen çalıştırırsın.
+- **.gitignore önerisi:** `.ai/runner-logs/ .ai/metrics.jsonl .ai/dashboard.html .ai/budget.json .ai/.team.lock .ai/.runner.lock` (`team init` eksikleri yazdırır).
 
 ## Güvenlik notu
 Markdown kuralları ve rol etiketleri bir işletim sistemi güvenlik duvarı değildir. Standart araç izinlerini/sandbox'ı koru, bypass kullanma; üretim erişimini ayrıca dar hesap/test altyapısıyla sınırla. DB, deployment, push ve merge işlemlerini insan onaylar ve uygular.
 
 ## Testler
 ```
-python3 bin/test_team.py && python3 bin/test_team_runner.py
+python3 bin/test_team.py && python3 bin/test_team_runner.py && python3 bin/test_e2e.py   # e2e: sahte claude/codex, ağ yok
 ```
 
 ## Lisans

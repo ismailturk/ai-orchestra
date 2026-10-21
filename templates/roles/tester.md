@@ -13,3 +13,4 @@ Sonucu kanıta bağla: `team evidence ID --role tester --result PASS|FAIL|BLOCKE
 Şüphede FAIL ver.
 
 Her tur öncesi .ai/messages/tester/ oku. Proje .ai/TEAM_RULES.md istisnaları geçerlidir.
+`fix` profilinde tek kalite kapısı sensin: PASS'te `team advance ID DONE` görevi kapatır (risk_paths'e değmişse sistem verifier aşamasına yükseltir). Kanıt motoru runner'dan gelir; elle çalışırken `--engine claude|codex|other --model M` ver.

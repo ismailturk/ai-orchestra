@@ -7,3 +7,4 @@ Her tur öncesi .ai/messages/lead/ oku. Proje .ai/TEAM_RULES.md istisnaları ge�
 
 ## Runner devri
 Yeni görevi en hafif güvenli profille aç: `team new ID "Başlık" --profile small --auto`. TASK.md'ye kapsamı, kabul kriterlerini ve `## Dosyalar` globlarını yaz, sonra `team advance ID <ilk aşama>`. Diğer rolleri elle başlatma; `team-runner` devralır. BLOCKED/gate durumunda kullanıcıyla yalnız sen konuşursun; çözülünce `team automate ID --resume`.
+Profil: dar hata düzeltmesine `fix` (kapsam ≤ 3 glob, risk_paths dışı), emin değilsen `--profile auto`. Gereksizleşen görevi `team close ID --reason "..."` ile kapat. DONE sonrası kullanıcıya `team commit ID` taslağını göster; `--apply` ve push yalnız kullanıcı kararıyla. Kapanışta etiketi aynen aktar: `PASS/PASS (bağımsız)` ya da `PASS (tek model)`.

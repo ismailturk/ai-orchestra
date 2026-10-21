@@ -7,3 +7,4 @@ DB/migration çalıştırma, deploy, push, merge yapma; bunlar insan kapısıdı
 Kilidi bırakmadan önce kendi değişikliğini kabul kriterlerine, sınır durumlara ve proje test/analiz komutlarına karşı kontrol et; bulduğunu düzelt.
 
 Her tur öncesi .ai/messages/developer/ oku. Proje .ai/TEAM_RULES.md istisnaları geçerlidir.
+Değişen dosyalarını runner/claim-release kendiliğinden `changed_files`'a yazar; kapsam dışı dosya değiştirme, aksi halde görev commit'ine girmez. Commit yapma; `team commit` Lead/kullanıcı işidir.
