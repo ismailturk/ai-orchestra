@@ -120,8 +120,12 @@ def update():
     if r.returncode: raise ValueError('git pull başarısız: '+(r.stderr or r.stdout).strip())
     return r.stdout.strip()
 
+def utcnow():
+    # TEAM_NOW_OFFSET (seconds) shifts the clock for tests (limit retry) without real waiting.
+    return dt.datetime.now(dt.timezone.utc)+dt.timedelta(seconds=float(os.environ.get('TEAM_NOW_OFFSET') or 0))
+
 def now():
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return utcnow().isoformat()
 
 def slug(value):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}', value):

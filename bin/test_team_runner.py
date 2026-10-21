@@ -299,6 +299,29 @@ class RunnerTests(unittest.TestCase):
         self.assertIn(str((fake/'cache').resolve()), arg)
         self.assertIn('.pub-cache', arg)
 
+    def test_install_agent_writes_only_service_file_and_prints_commands(self):
+        home = Path(self.tmp.name)/'home'
+        with patch.dict('os.environ', {'HOME': str(home), 'XDG_CONFIG_HOME': str(home/'.config')}), \
+             patch.object(team_runner.subprocess, 'run') as ran:
+            out = team_runner.install_agent(self.root, dry_run=True, platform='darwin')
+            plist = home/'Library/LaunchAgents/com.ai-orchestra.runner.fixture.plist'
+            self.assertIn('DRY-RUN', out); self.assertFalse(plist.exists())
+            out = team_runner.install_agent(self.root, platform='darwin')
+            data = team_runner.plistlib.loads(plist.read_bytes())
+            self.assertTrue(data['RunAtLoad'] and data['KeepAlive'])
+            self.assertEqual(data['StandardOutPath'], str(self.root/'.ai/runner-logs/_team_runner.log'))
+            self.assertEqual(data['ProgramArguments'][-3:], ['--project', str(self.root), 'watch'])
+            self.assertIn('PATH', data['EnvironmentVariables'])
+            self.assertIn('launchctl bootstrap gui/$(id -u)', out)
+            self.assertIn('bootout', team_runner.uninstall_agent(self.root, platform='darwin'))
+            self.assertTrue(plist.exists())  # no --apply: kept
+            team_runner.uninstall_agent(self.root, apply=True, platform='darwin')
+            self.assertFalse(plist.exists())
+            out = team_runner.install_agent(self.root, platform='linux')
+            unit = home/'.config/systemd/user/ai-orchestra-runner-fixture.service'
+            self.assertIn('Restart=always', unit.read_text()); self.assertIn('systemctl --user enable --now', out)
+            ran.assert_not_called()  # never runs launchctl/systemctl itself
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

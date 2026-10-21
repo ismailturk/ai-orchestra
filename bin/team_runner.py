@@ -7,7 +7,9 @@ import contextlib
 import fcntl
 import json
 import os
+import plistlib
 import re
+import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
@@ -47,11 +49,19 @@ DEFAULT_STATUS_MINUTES = 10.0
 
 
 _last_line = ['']
+_warned = {}
 
 
 def stamp(message):
     _last_line[0] = message
     print(time.strftime('[%H:%M:%S]'), message, flush=True)
+
+
+def warn_once(key, message):
+    """Log a recurring per-task problem once instead of on every poll."""
+    if _warned.get(key) != message:
+        _warned[key] = message
+        stamp(message)
 
 
 def render_event(role, event):
@@ -511,9 +521,16 @@ def run_process(root, ident, role, command, run_id,
 def enabled_tasks(root, only=None):
     result = []
     for state_file in sorted((root / 'tasks').glob('*/state.json')):
-        if only and state_file.parent.name != only:
+        ident = state_file.parent.name
+        if only and ident != only:
             continue
-        state = team.read(state_file)
+        try:
+            state = team.read(state_file)
+        except (OSError, ValueError) as error:
+            # One unreadable task must not stop the runner; it is retried next round.
+            warn_once(ident, f'{ident}: ATLANDI · state okunamadı ({error}); sonraki turda denenecek')
+            continue
+        _warned.pop(ident, None)
         auto = state.get('automation', {})
         if auto.get('enabled'):
             result.append((state_file.parent.name, state))
@@ -537,7 +554,7 @@ def limit_retry(log_path, now=None):
         return None
     if not any(m in text.lower().replace('’', "'") for m in LIMIT_MARKERS):
         return None
-    now = now or datetime.now(timezone.utc)
+    now = now or team.utcnow()
     found = RESET_RE.findall(text)
     if found:
         hour, minute, ampm, zone = found[-1]
@@ -572,7 +589,7 @@ def waiting_limit(auto):
     if auto.get('status') != 'WAITING_LIMIT':
         return False
     try:
-        return datetime.now(timezone.utc) < datetime.fromisoformat(auto['retry_at'])
+        return team.utcnow() < datetime.fromisoformat(auto['retry_at'])
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -692,7 +709,8 @@ def dispatch_once(root, only=None, dry_run=False,
     return 'IDLE'
 
 
-SOURCE_ROLES = {'developer', 'tester', 'verifier'}
+# Lead too: its knowledge ack fingerprints the task source, which a parallel Developer would change.
+SOURCE_ROLES = {'developer', 'tester', 'verifier', 'lead'}
 DEFAULT_RUNNER_CONFIG = {'max_parallel': 3, 'serial_roles': ['tester', 'verifier', 'lead']}
 
 
@@ -739,14 +757,27 @@ def watch_loop(root, only, poll, timing, once_round=False):
     while True:
         for ident in [i for i, (t, _, _) in running.items() if not t.is_alive()]:
             del running[ident]
-        cfg = runner_config(root)
-        for ident, state in enabled_tasks(root, only):
+        try:
+            cfg = runner_config(root)
+            tasks = enabled_tasks(root, only)
+        except Exception as error:  # e.g. a broken runner.json; keep the loop alive and retry
+            warn_once('_round', f'Runner turu atlandı: {error}')
+            tasks = []
+        for ident, state in tasks:
             if ident in running:
                 continue
-            role = triage(root, ident, state)
-            if not role:
+            try:
+                role = triage(root, ident, state)
+                if not role:
+                    continue
+                scope = team.task_scope(team.task(root, ident))
+                # A manual/foreign source lock (or an unreadable state: OSError, fail-closed) defers the
+                # Developer to a later round instead of launching a run whose claim must fail.
+                if role == 'developer' and team.lock_conflict(root, scope, ident):
+                    continue
+            except Exception as error:  # an I/O problem in one task skips only that task this round
+                warn_once(ident, f'{ident}: ATLANDI · {type(error).__name__}: {error}; sonraki turda denenecek')
                 continue
-            scope = team.task_scope(team.task(root, ident))
             if not admissible([(i, r, s) for i, (_, r, s) in running.items()], (ident, role, scope), cfg):
                 continue
             thread = threading.Thread(target=run_task_safely, args=(root, ident, state, role, *timing),
@@ -767,6 +798,54 @@ def runner_lock(root):
         except BlockingIOError:
             raise RuntimeError('Bu proje için Team Runner zaten çalışıyor.')
         yield
+
+
+def agent_unit(root, platform=None):
+    """(path, content, load command, unload command) of a per-project user service running `watch`."""
+    platform = platform or sys.platform
+    pid = re.sub(r'[^A-Za-z0-9_.-]', '-', str(team.read(root/'.ai/project.json').get('id') or root.name))
+    log = root/'.ai'/'runner-logs'/'_team_runner.log'
+    args = [sys.executable, str(Path(__file__).resolve()), '--project', str(root), 'watch']
+    path_env = os.environ.get('PATH', '')
+    if platform == 'darwin':
+        label = f'com.ai-orchestra.runner.{pid}'
+        path = Path.home()/'Library'/'LaunchAgents'/f'{label}.plist'
+        body = plistlib.dumps({'Label': label, 'ProgramArguments': args, 'RunAtLoad': True,
+                               'KeepAlive': True, 'WorkingDirectory': str(root),
+                               'StandardOutPath': str(log), 'StandardErrorPath': str(log),
+                               'EnvironmentVariables': {'PATH': path_env}}).decode()
+        quoted = shlex.quote(str(path))
+        return path, body, f'launchctl bootstrap gui/$(id -u) {quoted}', f'launchctl bootout gui/$(id -u) {quoted}'
+    name = f'ai-orchestra-runner-{pid}.service'
+    path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd'/'user'/name
+    body = (f'[Unit]\nDescription=ai-orchestra runner ({pid})\n\n[Service]\n'
+            f'ExecStart={shlex.join(args)}\nWorkingDirectory={root}\nEnvironment="PATH={path_env}"\n'
+            f'Restart=always\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n'
+            '[Install]\nWantedBy=default.target\n')
+    return path, body, f'systemctl --user daemon-reload && systemctl --user enable --now {name}', \
+        f'systemctl --user disable --now {name}'
+
+
+def install_agent(root, dry_run=False, platform=None):
+    """Write the service file; the user runs the printed load command (never run here)."""
+    path, body, load, _ = agent_unit(root, platform)
+    if dry_run:
+        return f'DRY-RUN, yazılmadı: {path}\n{body}\nYüklemek için:\n  {load}'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (root/'.ai'/'runner-logs').mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return f'Yazıldı: {path}\nYüklemek için kendin çalıştır:\n  {load}'
+
+
+def uninstall_agent(root, apply=False, platform=None):
+    path, _, _, unload = agent_unit(root, platform)
+    out = f'Önce durdur (kendin çalıştır):\n  {unload}'
+    if not apply:
+        return out + f'\nDRY-RUN: {path} silinmedi; silmek için --apply.'
+    if path.exists():
+        path.unlink()
+        return out + f'\nSilindi: {path}'
+    return out + f'\nDosya yok: {path}'
 
 
 def show_status(root):
@@ -793,6 +872,10 @@ def main():
     once = sub.add_parser('once'); once.add_argument('--dry-run', action='store_true')
     watch = sub.add_parser('watch'); watch.add_argument('--poll', type=float, default=2.0)
     sub.add_parser('status')
+    q = sub.add_parser('install-agent'); q.add_argument('--project', default=argparse.SUPPRESS)
+    q.add_argument('--dry-run', action='store_true')
+    q = sub.add_parser('uninstall-agent'); q.add_argument('--project', default=argparse.SUPPRESS)
+    q.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     if args.turn_warning_minutes <= 0:
         parser.error('--turn-warning-minutes must be greater than zero')
@@ -801,6 +884,10 @@ def main():
     root = team.project(args.project)
     if args.command == 'status':
         show_status(root); return
+    if args.command == 'install-agent':
+        print(install_agent(root, args.dry_run)); return
+    if args.command == 'uninstall-agent':
+        print(uninstall_agent(root, args.apply)); return
     with runner_lock(root):
         if args.command == 'once':
             dispatch_once(root, args.task, args.dry_run,
