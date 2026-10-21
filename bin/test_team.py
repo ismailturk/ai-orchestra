@@ -625,6 +625,26 @@ class TeamTests(unittest.TestCase):
         (self.p/'TASK.md').write_text('## Dosyalar\n- lib/b/**\n')
         self.assertIn('Profil: fix',self.cli('reclassify','DEMO-001','auto','--reason','auto').stdout)
 
+    def test_engine_independence_label_and_required_verifier_cli(self):
+        p=team.create(self.root,'IN-1','independence','tweak');s=team.read(p/'state.json')
+        for st in ['DESIGN','IMPLEMENTATION','TEST_CLAUDE']:team.advance(self.root,p,s,st)
+        (p/'TEST_CLAUDE.md').write_text('STATUS: PASS\n'+'Evidence results\n'*15)
+        team.evidence(self.root,p,s,'tester','PASS','t1','n',engine='claude',model='sonnet')
+        team.advance(self.root,p,s,'VERIFY_CODEX')
+        (p/'VERIFY_CODEX.md').write_text('STATUS: PASS\n'+'Evidence results\n'*15)
+        team.evidence(self.root,p,s,'verifier','PASS','v1','n',engine='claude')
+        self.assertEqual((s['codex_verify']['engine'],s['codex_verify']['engine_id'],s['claude_test']['model']),('Claude Code','claude','sonnet'))
+        self.assertEqual((team.independence(s),team.pass_label(s)),('single-model','PASS (tek model)'))
+        self.finish_report(p);team.atomic(p/'state.json',s)
+        (self.root/'.ai/runner.json').write_text(json.dumps({'require_independent_verifier':True}))
+        self.assertIn('Bağımsız doğrulayıcı zorunlu',self.cli('advance','IN-1','DONE',ok=False).stderr)
+        a=team.read(p/'state.json');self.assertEqual((a['stage'],a['automation']['status']),('VERIFY_CODEX','BLOCKED'))
+        (self.root/'.ai/runner.json').write_text('{}')
+        self.cli('advance','IN-1','DONE')
+        self.assertEqual(team.read(p/'state.json')['independence'],'single-model')
+        old={'claude_test':{'engine':'Claude Code'},'codex_verify':{'engine':'Codex'}}  # pre-engine_id records
+        self.assertEqual(team.pass_label(old),'PASS/PASS (bağımsız)')
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:

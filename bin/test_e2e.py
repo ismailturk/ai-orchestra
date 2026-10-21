@@ -145,6 +145,9 @@ class E2E(unittest.TestCase):
         s = self.state('APP-001')
         self.assertEqual((s['stage'], s['automation']['status']), ('DONE', 'COMPLETED'), self.log.getvalue())
         self.assertEqual(s['changed_files'], ['src/APP-001.txt'])
+        self.assertEqual(s['independence'], 'independent')
+        self.assertEqual(s['codex_verify']['engine_id'], 'codex'); self.assertEqual(s['claude_test']['engine_id'], 'claude')
+        self.assertIn('PASS/PASS (bağımsız)', self.log.getvalue())
 
     def test_b_fix_done_changelog_and_risk_escalation(self):
         cfg = team.read(self.root / '.ai/runner.json'); cfg['risk_paths'] = ['core/**']
@@ -153,7 +156,7 @@ class E2E(unittest.TestCase):
         self.task('APP-003', 'fix', files=['core/db.txt'])
         self.drive()
         a, b = self.state('APP-002'), self.state('APP-003')
-        self.assertEqual((a['stage'], a['profile']), ('DONE', 'fix'))
+        self.assertEqual((a['stage'], a['profile'], a['independence']), ('DONE', 'fix', 'single-model'))
         self.assertIsNone(a['codex_verify'])
         log = (self.root / '.ai/CHANGELOG.md').read_text()
         self.assertIn('APP-002 — Title APP-002 — PASS', log); self.assertNotIn('APP-003', log)

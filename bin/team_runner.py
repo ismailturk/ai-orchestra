@@ -306,7 +306,9 @@ FAIL ise FAIL kanıtı kaydet, Developer/Lead mesajı bırak ve rework komutuyla
 """
     elif role == 'verifier':
         protocol = f"""
-Claude raporunu kopyalama. Aynı kaynak sürümünde kritik testleri bağımsız yeniden çalıştır; negatif ve kenar durumlarını incele.
+Tester raporunu kopyalama. Aynı kaynak sürümünde kritik testleri bağımsız yeniden çalıştır; negatif ve kenar durumlarını incele.
+Kabul kriterlerinden en az bir kontrolü/testi KENDİN türet ve çalıştır (Tester'ın komutunun tekrarı sayılmaz);
+VERIFY_CODEX.md içinde "## Bağımsız kontroller" başlığı altında komut ve sonucuyla listele.
 VERIFY_CODEX.md ve taslak FINAL_REPORT.md dosyalarını doldur; üretim kodunu düzeltme.
 PASS ise sırasıyla kanıtı kaydet ve ilerle:
 {command('evidence', ident, '--role', 'verifier', '--result', 'PASS', '--session', run_id, '--note', ('Team Runner independent ' + ('Claude' if 'verifier' in CLAUDE_ROLES else 'Codex') + ' verification; ayrintilar VERIFY_CODEX.md'))}
@@ -425,6 +427,17 @@ def command_for(root, ident, state, role, prompt, run_id):
     return cmd, 'codex', previous
 
 
+def engine_model(role, command):
+    """(engine, configured model or None) of a role command built by command_for."""
+    model = None
+    for i, part in enumerate(command[:-1]):
+        if part == '--model':
+            model = command[i + 1]
+        elif part == '-c' and command[i + 1].startswith('model='):
+            model = command[i + 1][6:].strip('"')
+    return ('claude' if role in CLAUDE_ROLES else 'codex'), model
+
+
 def run_process(root, ident, role, command, run_id,
                 warning_seconds=DEFAULT_TURN_WARNING_MINUTES * 60,
                 idle_seconds=DEFAULT_IDLE_TIMEOUT_MINUTES * 60,
@@ -436,6 +449,11 @@ def run_process(root, ident, role, command, run_id,
                AI_TEAM_PROJECT=team.read(root/'.ai/project.json')['id'],
                AI_TEAM_TASK=ident, AI_TEAM_RUN_ID=run_id)
     env['ENABLE_CLAUDEAI_MCP_SERVERS'] = 'false'  # claude.ai connectors off for runner roles
+    # team.py evidence records the real engine/model, which decides the independence label.
+    env['AI_TEAM_ENGINE'], model = engine_model(role, command)
+    env.pop('AI_TEAM_MODEL', None)
+    if model:
+        env['AI_TEAM_MODEL'] = model
     # Project extras from .ai/runner.json: "env" (all roles) and "env_by_role" ({role: {K: V}}).
     rcfg = runner_config(root)
     env.update({str(k): str(v) for k, v in (rcfg.get('env') or {}).items()})
@@ -601,8 +619,8 @@ def triage(root, ident, state):
     if stage == 'DONE':
         if auto.get('status') != 'COMPLETED':
             update_runner_state(root, ident, status='COMPLETED', role=None,
-                                run_id=None, message='Görev tamamlandı')
-            notify('AI Team tamamlandı', ident)
+                                run_id=None, message='Görev tamamlandı · ' + team.pass_label(state))
+            notify('AI Team tamamlandı', f'{ident} · {team.pass_label(state)}')
         return None
     if auto.get('status') in {'BLOCKED', 'PAUSED'} or waiting_limit(auto):
         return None
@@ -677,22 +695,25 @@ def run_task(root, ident, state, role, dry_run=False,
         notify('AI Team rol hatası', f'{ident}: {role}, çıkış kodu {code}')
         stamp(f'{ident}: DURDU · {role} çıkış kodu {code} · {log_path}')
         return 'BLOCKED'
+    if after.get('automation', {}).get('status') == 'BLOCKED':
+        # team.py itself blocked the task (rework limit, independence rule); keep its message.
+        notify('AI Team kontrol gerekli', f'{ident}: {after["automation"].get("message")}')
+        stamp(f'{ident}: DURDU · {after["automation"].get("message")}')
+        return 'BLOCKED'
     if after['stage'] == stage:
         update_runner_state(root, ident, status='BLOCKED', role=role, run_id=run_id,
                             message=f'{role} aşamayı ilerletmedi; log: {log_path}')
         notify('AI Team kontrol gerekli', f'{ident}: {role} aşamayı ilerletmedi')
         stamp(f'{ident}: DURDU · {role} aşamayı ilerletmedi · {log_path}')
         return 'BLOCKED'
-    if after.get('automation', {}).get('status') == 'BLOCKED':
-        # team.py itself blocked the task (e.g. rework limit); keep its message.
-        notify('AI Team kontrol gerekli', f'{ident}: {after["automation"].get("message")}')
-        stamp(f'{ident}: DURDU · {after["automation"].get("message")}')
-        return 'BLOCKED'
-    update_runner_state(root, ident,
-                        status='COMPLETED' if after['stage']=='DONE' else 'IDLE',
+    done = after['stage'] == 'DONE'
+    label = f' · {team.pass_label(after)}' if done else ''
+    update_runner_state(root, ident, status='COMPLETED' if done else 'IDLE',
                         role=None, run_id=None,
-                        message=f'{stage} → {after["stage"]}')
-    stamp(f'{ident}: {stage} → {after["stage"]}')
+                        message=f'{stage} → {after["stage"]}{label}')
+    stamp(f'{ident}: {stage} → {after["stage"]}{label}')
+    if done:
+        notify('AI Team tamamlandı', f'{ident}{label}')
     return 'ADVANCED'
 
 

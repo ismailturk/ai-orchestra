@@ -462,7 +462,23 @@ def message(root, ident, sender, recipient, body):
     atomic(root/'.ai/messages'/recipient/(msg['id']+'.json'),msg)
     return msg
 
-def evidence(root, p, s, role, result, session, note):
+class Blocked(ValueError):
+    """A refusal that also parks the task as BLOCKED with this message."""
+
+ENGINE_LABELS={'claude':'Claude Code','codex':'Codex'}
+
+def engine_of(e):
+    """claude|codex|other for an evidence record; old records only carry the display label."""
+    return e.get('engine_id') or {v:k for k,v in ENGINE_LABELS.items()}.get(e.get('engine'),'other')
+
+def independence(s):
+    t,v=s.get('claude_test'),s.get('codex_verify')
+    return 'independent' if t and v and engine_of(t)!=engine_of(v) else 'single-model'
+
+def pass_label(s):
+    return 'PASS/PASS (bağımsız)' if independence(s)=='independent' else 'PASS (tek model)'
+
+def evidence(root, p, s, role, result, session, note, engine=None, model=None):
     required={'tester':('TEST_CLAUDE','TEST_CLAUDE.md','claude_test'),
               'verifier':('VERIFY_CODEX','VERIFY_CODEX.md','codex_verify')}
     stage, filename, key = required[role]
@@ -484,7 +500,12 @@ def evidence(root, p, s, role, result, session, note):
             raise ValueError('Production source changed since Claude PASS; rerun the Claude stage.')
         if session == first['session']:
             raise ValueError('Independent Codex session required.')
-    s[key]={'engine':ROLES[role],'role':role,'session':session,'result':result,
+    # The runner exports the real engine/model of the role process; manual calls may pass them.
+    default='codex' if role=='verifier' and os.environ.get('TEAM_VERIFIER_ENGINE')!='claude' else 'claude'
+    engine=engine or os.environ.get('AI_TEAM_ENGINE') or default
+    s[key]={'engine':ENGINE_LABELS.get(engine,engine),'engine_id':engine,
+            'model':model or os.environ.get('AI_TEAM_MODEL') or None,
+            'role':role,'session':session,'result':result,
             'fingerprint':fingerprint,'production_fingerprint':production,
             'created':now(),'note':note,
             'report_sha256':hashlib.sha256(report.encode()).hexdigest()}
@@ -523,6 +544,11 @@ def advance(root,p,s,stage):
                 raise ValueError('Knowledge update acknowledgement required on same source.')
         if 'VERIFY_CODEX' in path and 'STATUS: NOT_RUN' in (p/'FINAL_REPORT.md').read_text():
             raise ValueError('Final report is not written.')
+        if (runner_json(root).get('require_independent_verifier') and s.get('profile')!='fix'
+                and independence(s)=='single-model'):
+            raise Blocked('Bağımsız doğrulayıcı zorunlu (runner.json require_independent_verifier): tester ve '
+                          'verifier aynı motor; verifier\'ı farklı motorla yeniden çalıştır.')
+        s['independence']=independence(s)
     s['stage']=stage
     if stage=='DONE':
         s['done_at']=now()
@@ -621,6 +647,7 @@ def main():
     q=sub.add_parser('claim'); q.add_argument('id'); q.add_argument('--session',required=True)
     q=sub.add_parser('release'); q.add_argument('id'); q.add_argument('--session',required=True)
     q=sub.add_parser('evidence'); q.add_argument('id'); q.add_argument('--role',choices=['tester','verifier'],required=True); q.add_argument('--result',choices=['PASS','FAIL','BLOCKED'],required=True); q.add_argument('--session',required=True); q.add_argument('--note',required=True)
+    q.add_argument('--engine',choices=['claude','codex','other']); q.add_argument('--model')
     q=sub.add_parser('knowledge'); q.add_argument('id'); q.add_argument('--summary',required=True)
     q=sub.add_parser('gate'); q.add_argument('id'); q.add_argument('--kind',choices=['DB','HIGH_IMPACT','UNKNOWN_IMPACT'],required=True); q.add_argument('--action',required=True); q.add_argument('--target',required=True); q.add_argument('--environment',required=True)
     q=sub.add_parser('resolve-gate'); q.add_argument('id'); q.add_argument('gate_id'); q.add_argument('--user-message-ref',required=True); q.add_argument('--outcome',choices=['cancelled','user-applied','explicitly-approved'],required=True)
@@ -655,7 +682,12 @@ def main():
         return
     with locked(root):
         p=task(root,args.id); s=read(p/'state.json')
-        if args.cmd=='advance': advance(root,p,s,args.stage)
+        if args.cmd=='advance':
+            try: advance(root,p,s,args.stage)
+            except Blocked as e:
+                s.setdefault('automation',{}).update(status='BLOCKED',role=None,run_id=None,message=str(e),updated=now())
+                s['updated']=now();s['revision']+=1;atomic(p/'state.json',s)
+                raise
         elif args.cmd=='rework':
             if s['developer']: raise ValueError('Release developer lock first.')
             # Every rework cycle needs its own CURRENT_STATE update; the old baseline must not satisfy it.
@@ -696,7 +728,7 @@ def main():
             base=claim_baseline(root,p.name)
             if base.is_file():
                 add_changed(p,s,read(base),git_changes(root)); base.unlink()
-        elif args.cmd=='evidence': evidence(root,p,s,args.role,args.result,args.session,args.note)
+        elif args.cmd=='evidence': evidence(root,p,s,args.role,args.result,args.session,args.note,args.engine,args.model)
         elif args.cmd=='knowledge':
             if s['stage']!='KNOWLEDGE_UPDATE': raise ValueError('Wrong stage.')
             docs=knowledge_hashes(root)
