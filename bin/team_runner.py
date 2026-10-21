@@ -245,8 +245,10 @@ def record_changes(root, ident, before):
     after = team.git_changes(root)
     with team.locked(root):
         p, state = load_state(root, ident)
-        team.add_changed(p, state, before, after)
+        outside = team.add_changed(p, state, before, after)
         team.atomic(p / 'state.json', state)
+    if outside:
+        stamp(f'{ident}: UYARI · kapsam dışı değişiklik: {", ".join(outside[:10])}')
 
 
 def notify(title, body):
@@ -705,7 +707,7 @@ def run_task(root, ident, state, role, dry_run=False,
 
     if after.get('escalated') and not state.get('escalated'):
         esc = after['escalated']
-        stamp(f'{ident}: YÜKSELTİLDİ · fix → small (risk_paths: {", ".join(esc.get("files") or [])}); VERIFY_CODEX eklendi')
+        stamp(f'{ident}: YÜKSELTİLDİ · fix → small ({esc.get("reason")}: {", ".join(esc.get("files") or []) or "-"}); VERIFY_CODEX eklendi')
     failed = code != 0 or after['stage'] == stage
     retry_at = limit_retry(log_path) if failed else None
     if retry_at:
@@ -842,14 +844,25 @@ def watch_loop(root, only, poll, timing, once_round=False):
         time.sleep(max(poll, 0.5))
 
 
+LOCK_RETRY_SECONDS = 60.0
+
+
 @contextlib.contextmanager
-def runner_lock(root):
+def runner_lock(root, wait=False):
+    """Single watcher per project. With wait (watch), a held lock is retried every LOCK_RETRY_SECONDS
+    with one log line, so a service manager's KeepAlive does not respawn-loop and flood the log."""
     path = root / '.ai' / '.runner.lock'
     with path.open('a') as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError('Bu proje için Team Runner zaten çalışıyor.')
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if not wait:
+                    raise RuntimeError('Bu proje için Team Runner zaten çalışıyor.')
+                warn_once('_lock', f'Başka bir Team Runner çalışıyor; {LOCK_RETRY_SECONDS:g} sn arayla bekleniyor.')
+                time.sleep(LOCK_RETRY_SECONDS)
+        _warned.pop('_lock', None)
         yield
 
 
@@ -946,7 +959,7 @@ def main():
         print(install_agent(root, args.dry_run)); return
     if args.command == 'uninstall-agent':
         print(uninstall_agent(root, args.apply)); return
-    with runner_lock(root):
+    with runner_lock(root, wait=args.command == 'watch'):
         if args.command == 'once':
             dispatch_once(root, args.task, args.dry_run,
                           args.turn_warning_minutes * 60,

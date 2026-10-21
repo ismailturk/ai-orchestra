@@ -642,8 +642,12 @@ class TeamTests(unittest.TestCase):
         (self.root/'.ai/runner.json').write_text('{}')
         self.cli('advance','IN-1','DONE')
         self.assertEqual(team.read(p/'state.json')['independence'],'single-model')
-        old={'claude_test':{'engine':'Claude Code'},'codex_verify':{'engine':'Codex'}}  # pre-engine_id records
-        self.assertEqual(team.pass_label(old),'PASS/PASS (bağımsız)')
+        # Pre-engine_id records: the old label is not trusted; metrics decide, else "unknown" (never independent).
+        old={'task':'OLD-1','claude_test':{'engine':'Claude Code','role':'tester'},'codex_verify':{'engine':'Codex','role':'verifier'}}
+        self.assertEqual(team.pass_label(old),'PASS (bağımsızlık bilinmiyor)')
+        for role,eng in (('tester','claude'),('verifier','codex')):
+            team.metric(self.root,{'type':'run','task':'OLD-1','role':role,'engine':eng,'ts_start':team.now()})
+        self.assertEqual(team.pass_label(old,team.metric_engines(self.root)),'PASS/PASS (bağımsız)')
 
     def test_close_abandon_and_grouped_status_cli(self):
         self.assertIn('Seni bekliyor',self.cli('status').stdout)  # DEMO-001 NEW
@@ -661,8 +665,9 @@ class TeamTests(unittest.TestCase):
         self.cli('close','DEMO-001','--reason','merged elsewhere')
         self.assertEqual(team.read(self.p/'state.json')['stage'],'CLOSED')
         self.assertEqual(self.cli('status').stdout.strip(),'Açık görev yok.')
-        d=team.create(self.root,'ST-2','done');s=team.read(d/'state.json');s.update(stage='DONE',changed_files=['a.txt']);team.atomic(d/'state.json',s)
-        self.assertIn('Commit bekliyor (1)\n  ST-2 DONE — 1 dosya',self.cli('status').stdout)
+        self.git_repo();(self.root/'a.txt').write_text('dirty')
+        d=team.create(self.root,'ST-2','done');s=team.read(d/'state.json');s.update(stage='DONE',changed_files=['a.txt','source.txt']);team.atomic(d/'state.json',s)
+        self.assertIn('Commit bekliyor (1)\n  ST-2 DONE — 1 dosya',self.cli('status').stdout)  # clean source.txt not counted
         self.assertEqual(len(json.loads('['+self.cli('status','--all').stdout.replace('}\n{','},{')+']')),3)
         self.assertEqual(json.loads(self.cli('status','ST-1').stdout)['stage'],'ABANDONED')
 
@@ -745,6 +750,97 @@ class TeamTests(unittest.TestCase):
             self.assertIn('live-model',urllib.request.urlopen(url).read().decode())
             srv[0].shutdown()
 
+    def test_fingerprint_follows_gate_version_not_tool_bytes(self):
+        import importlib.util as iu
+        a=team.snapshot(self.root)
+        copy=Path(self.tmp.name)/'copy/team.py';copy.parent.mkdir()
+        copy.write_text(Path(team.__file__).read_text()+'\n# tool update without gate change\n')
+        spec=iu.spec_from_file_location('team_copy',copy);other=iu.module_from_spec(spec);spec.loader.exec_module(other)
+        self.assertEqual(other.snapshot(self.root),a)
+        with patch.object(team,'GATE_VERSION','999'):self.assertNotEqual(team.snapshot(self.root),a)
+
+    def test_out_of_scope_changes_warn_and_count_for_risk(self):
+        self.git_repo()
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/auth/**']}))
+        p=team.create(self.root,'OS-1','oos','fix',files=['lib/ok/**']);self.cli('advance','OS-1','IMPLEMENTATION')
+        self.cli('claim','OS-1','--session','s')
+        for f in ('lib/ok/a.dart','lib/auth/x.dart'):(self.root/f).parent.mkdir(parents=True,exist_ok=True);(self.root/f).write_text('1')
+        self.cli('release','OS-1','--session','s')
+        s=team.read(p/'state.json')
+        self.assertEqual((s['changed_files'],s['out_of_scope_changes']),(['lib/ok/a.dart'],['lib/auth/x.dart']))
+        self.assertIn('UYARI: OS-1 kapsam dışı değişiklik: lib/auth/x.dart',self.cli('status').stdout)
+        self.cli('advance','OS-1','TEST_CLAUDE');s=team.read(p/'state.json');self.pass_report('tester','t',p,s)
+        team.advance(self.root,p,s,'DONE')
+        self.assertEqual((s['stage'],s['escalated']['files']),('VERIFY_CODEX',['lib/auth/x.dart']))
+
+    def test_fix_without_git_escalates_when_risk_paths_set(self):
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/auth/**']}))
+        p=team.create(self.root,'NG-1','no git','fix');s=team.read(p/'state.json')
+        team.advance(self.root,p,s,'IMPLEMENTATION');team.advance(self.root,p,s,'TEST_CLAUDE')
+        self.pass_report('tester','t',p,s);team.advance(self.root,p,s,'DONE')
+        self.assertEqual((s['stage'],s['escalated']['reason']),('VERIFY_CODEX','no-git'))
+        (self.root/'.ai/runner.json').write_text('{}')  # no risk_paths: plain fix closes
+        p=team.create(self.root,'NG-2','no git','fix');s=team.read(p/'state.json')
+        team.advance(self.root,p,s,'IMPLEMENTATION');team.advance(self.root,p,s,'TEST_CLAUDE')
+        self.pass_report('tester','t2',p,s);team.advance(self.root,p,s,'DONE');self.assertEqual(s['stage'],'DONE')
+
+    def test_bad_metric_lines_do_not_break_readers(self):
+        (self.root/'.ai/runner.json').write_text(json.dumps({'budget':{'daily_usd':1,'task_usd':1}}))
+        good=json.dumps({'type':'run','task':'DEMO-001','role':'tester','ts_start':team.now(),'cost_usd':0.999,'tokens':{'input':1}})
+        (self.root/'.ai/metrics.jsonl').write_text('\n'.join(['[1,2]','null','{"tokens":"x"}','"s"',
+            '{"type":"run","tokens":{"input":"x"},"cost_usd":"abc","duration_s":"z","role":5,"ts_start":7}','{{bad',good])+'\n')
+        rows=team.load_metrics(self.root)
+        self.assertEqual(len(rows),3);self.assertIsNone(rows[0]['tokens']);self.assertEqual(rows[1]['tokens']['input'],0)
+        self.assertIsNone(rows[1]['cost_usd']);self.assertIsNone(rows[1]['role'])
+        for c in (['report'],['status'],['budget'],['dashboard','--out',str(Path(self.tmp.name)/'x.html')]):self.cli(*c)
+        self.assertIn('(%99, %80 eşiği)',self.cli('budget').stdout)  # 99.9 floors, never reads as %100
+        self.assertIn('Kapanan görev: 0 · DONE 0',self.cli('report').stdout)
+        self.assertIsNone(team.task_over_budget(self.root,'DEMO-001',self.s))
+
+    def test_commit_records_head_when_task_files_already_clean(self):
+        g=self.git_repo()
+        p=team.create(self.root,'CL-1','clean','small');s=team.read(p/'state.json');s.update(stage='DONE',changed_files=['source.txt']);team.atomic(p/'state.json',s)
+        self.assertIn('zaten temiz',self.cli('commit','CL-1').stdout)
+        self.assertEqual(team.read(p/'state.json')['commit'],g('rev-parse','HEAD').strip())
+        self.assertNotIn('Commit bekliyor',self.cli('status').stdout)
+
+    def test_commit_handles_spaces_and_turkish_names(self):
+        g=self.git_repo()
+        p=team.create(self.root,'TR-1','Türkçe','small');self.cli('advance','TR-1','IMPLEMENTATION');self.cli('claim','TR-1','--session','s')
+        names=['lib/b c.dart','lib/Türkçe dosya.dart'];(self.root/'lib').mkdir()
+        for n in names:(self.root/n).write_text('x')
+        self.cli('release','TR-1','--session','s')
+        self.assertEqual(team.read(p/'state.json')['changed_files'],sorted(names))
+        g('add','--',names[0])  # staged file of this task is allowed
+        self.cli('commit','TR-1','--apply','--force')
+        self.assertEqual(sorted(g('-c','core.quotepath=off','show','--name-only','--format=').splitlines()),sorted(names))
+
+    def test_suggest_profile_matches_real_files_against_risk(self):
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/auth/**','lib/**/*approval*','**/Migrations/**']}))
+        for f in ('lib/ok/a.dart','lib/features/auth/x.dart','lib/features/leave/approval_card.dart'):
+            (self.root/f).parent.mkdir(parents=True,exist_ok=True);(self.root/f).write_text('1')
+        (self.root/'.ai/runner.json').write_text(json.dumps({'risk_paths':['lib/auth/**','lib/**/*approval*','**/features/auth/**']}))
+        sp=lambda *g:team.suggest_profile(self.root,self.scoped(*g))[0]
+        self.assertEqual(sp('lib/ok/a.dart'),'fix')             # coarse prefix "lib/" used to say small
+        self.assertEqual(sp('lib/ok/**'),'fix')
+        self.assertEqual(sp('lib/features/auth/x.dart'),'small')
+        self.assertEqual(sp('lib/features/leave/**'),'small')   # contains an *approval* file
+        self.assertEqual(sp('lib/new/**'),'small')              # no files yet: coarse fallback stays safe
+        self.assertEqual(sp('lib/**'),'small')                  # broad scope covers lib/auth/** (future files)
+        (self.root/'notes.md').write_text('x');self.assertEqual(sp('*.md'),'fix')
+
+    def scoped(self,*globs):
+        d=Path(tempfile.mkdtemp(dir=self.tmp.name));(d/'TASK.md').write_text('## Dosyalar\n'+''.join(f'- {g}\n' for g in globs));return d
+
+    def test_dashboard_escapes_markup_in_data_and_closed_message_rejected(self):
+        team.metric(self.root,{'type':'run','task':'DEMO-001','role':'tester','model':'</script><img onerror=1>&','ts_start':team.now()})
+        out=Path(self.tmp.name)/'d.html';self.cli('dashboard','--out',str(out))
+        html=out.read_text();self.assertNotIn('</script><img',html);self.assertIn('\\u003c/script\\u003e',html)
+        data=json.loads(html.split('id="data">')[1].split('</script>')[0])
+        self.assertEqual(data['projects'][0]['runs'][0]['model'],'</script><img onerror=1>&')
+        self.cli('close','DEMO-001','--reason','x')
+        self.assertIn('kapalı',self.cli('message','DEMO-001','--from','lead','--to','developer','--body','hi',ok=False).stderr)
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -782,6 +878,25 @@ class PortabilityTests(unittest.TestCase):
             f.write_text('edited'); out=run()
             self.assertIn('SKILL.md.bak',out.stdout); self.assertEqual((f.parent/'SKILL.md.bak').read_text(),'edited')
             self.assertIn('name: orchestra-setup',f.read_text())
+
+    def test_init_creates_project_json_and_fresh_project_reaches_done(self):
+        with tempfile.TemporaryDirectory() as d:
+            d=Path(d);team.init_project(d)
+            self.assertEqual(json.loads((d/'.ai/project.json').read_text())['source_roots'],[str(d.resolve())])
+            run=lambda *a: subprocess.run([sys.executable,str(Path(team.__file__)),'--project',str(d),*a],capture_output=True,text=True)
+            def ok(*a):
+                r=run(*a);self.assertEqual(r.returncode,0,r.stderr);return r
+            ok('new','APP-001','Fresh','--profile','small')
+            for st in ('IMPLEMENTATION','TEST_CLAUDE'):ok('advance','APP-001',st)
+            t=d/'tasks/APP-001';body='STATUS: PASS\nkomut sonuç ortam sınırlama\n'*8
+            (t/'TEST_CLAUDE.md').write_text(body);ok('evidence','APP-001','--role','tester','--result','PASS','--session','t','--note','n','--engine','claude')
+            ok('advance','APP-001','VERIFY_CODEX')
+            (t/'VERIFY_CODEX.md').write_text(body);(t/'FINAL_REPORT.md').write_text(body)
+            ok('evidence','APP-001','--role','verifier','--result','PASS','--session','v','--note','n','--engine','codex')
+            ok('advance','APP-001','KNOWLEDGE_UPDATE')
+            (d/'.ai/CURRENT_STATE.md').write_text('APP-001 done');ok('knowledge','APP-001','--summary','s')
+            ok('advance','APP-001','DONE')
+            s=json.loads((t/'state.json').read_text());self.assertEqual((s['stage'],s['independence']),('DONE','independent'))
 
     def test_init_suggests_gitignore_without_writing(self):
         with tempfile.TemporaryDirectory() as d:

@@ -39,6 +39,9 @@ WORKFLOWS = {
 }
 MAX_REWORKS = 3
 ROOT = Path(__file__).resolve().parent.parent
+# Part of every source fingerprint. Bump it by hand ONLY when the meaning of a gate/evidence check changes.
+# Hashing this file's bytes instead made every tool update (docs, a new command) stale all open evidence.
+GATE_VERSION = '2'
 
 DEFAULT_MODELS={"developer":"opus","developer_small":"sonnet","tester":"sonnet","analyst":"sonnet","designer":"sonnet","lead":"sonnet"}
 DEFAULT_RUNNER={"max_parallel":3,"serial_roles":["tester","verifier","lead"]}
@@ -66,6 +69,8 @@ def init_project(root,dry_run=False):
         if data is not None: atomic(f,data)
         else: f.parent.mkdir(parents=True,exist_ok=True); f.write_text(text)
     for name,data in (('models.json',DEFAULT_MODELS),('runner.json',DEFAULT_RUNNER)): put('.ai/'+name,data=data)
+    # project.json: what snapshot/launch/runner read (id, source_roots); a fresh project works end to end.
+    put('.ai/project.json',data={'id':re.sub(r'[^A-Za-z0-9_.-]','-',root.name) or 'project','source_roots':[str(root)]})
     for f in sorted((tpl/'project/ai').glob('*.md')):
         text=f.read_text()
         if f.name=='PROJECT.md': text=text.replace('# Proje\n','# '+root.name+'\n',1)
@@ -234,8 +239,8 @@ def snapshot(root, skip_tests=False, scope=None):
     """
     scope_res = [glob_re(g) for g in scope] if scope else None
     digest = hashlib.sha256()
-    # Tool/policy/config changes invalidate previous evidence too.
-    digest.update(Path(__file__).read_bytes())
+    # Gate semantics and policy/config changes invalidate previous evidence; ordinary tool updates do not.
+    digest.update(b'gate-version:' + GATE_VERSION.encode())
     for policy in ['.ai/project.json','.ai/TEAM_RULES.md','AGENTS.md','CLAUDE.md']:
         f=root/policy
         if f.is_file():digest.update(f.read_bytes())
@@ -291,12 +296,12 @@ COORD_DIRS = ('.ai/', 'tasks/', 'roles/')
 CLOSED_STAGES = ('DONE', 'CLOSED', 'ABANDONED')
 
 def git_changes(root):
-    """{path: content hash} of every dirty/untracked file under root, paths relative to root; {} without git."""
+    """{path: content hash} of every dirty/untracked file under root, paths relative to root; None without git."""
     r = subprocess.run(['git', '-C', str(root), 'status', '--porcelain', '-z', '--untracked-files=all', '--', '.'],
                        capture_output=True)
     pre = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-prefix'], capture_output=True, text=True)
     if r.returncode or pre.returncode:
-        return {}
+        return None
     prefix, out = pre.stdout.strip(), {}
     items = r.stdout.decode(errors='replace').split('\0')
     i = 0
@@ -317,14 +322,23 @@ def git_changes(root):
     return out
 
 def add_changed(p, s, before, after):
-    """Accumulate files whose dirty content differs between two git_changes() snapshots (task scope only)."""
+    """Accumulate files whose dirty content differs between two git_changes() snapshots.
+
+    In-scope files go to changed_files (the task's commit set); the rest to out_of_scope_changes, which
+    still counts for risk escalation (a parallel task's edit there only errs on the safe side).
+    Returns the newly seen out-of-scope files.
+    """
+    before, after = before or {}, after or {}
     files = {f for f in before.keys() | after.keys() if before.get(f) != after.get(f)}
     scope = task_scope(p)
-    if scope:
-        res = [glob_re(g) for g in scope]
-        files = {f for f in files if any(r.match(f) for r in res)}
-    s['changed_files'] = sorted(set(s.get('changed_files') or []) | files)
-    return s['changed_files']
+    res = [glob_re(g) for g in scope] if scope else []
+    inside = {f for f in files if not res or any(r.match(f) for r in res)}
+    outside = files - inside
+    s['changed_files'] = sorted(set(s.get('changed_files') or []) | inside)
+    new = sorted(outside - set(s.get('out_of_scope_changes') or []))
+    if outside:
+        s['out_of_scope_changes'] = sorted(set(s.get('out_of_scope_changes') or []) | outside)
+    return new
 
 def claim_baseline(root, ident):
     return root / '.ai' / 'runner-logs' / ident / 'claim-baseline.json'
@@ -341,7 +355,7 @@ def git(root, *args):
 def commit(root, ident, apply=False, force=False):
     """Per-task commit proposal; DRY-RUN unless apply. Never pushes."""
     p = task(root, ident); s = read(p / 'state.json')
-    dirty = git_changes(root)
+    dirty = git_changes(root) or {}
     files = [f for f in s.get('changed_files') or [] if f in dirty]
     msg = f'{ident}: {task_title(p, s)}'
     out = []
@@ -349,6 +363,14 @@ def commit(root, ident, apply=False, force=False):
     if not closed:
         out.append(f'UYARI: görev {s["stage"]} aşamasında (DONE/CLOSED değil); --apply için --force gerekir.')
     if not files:
+        head = git(root, 'rev-parse', 'HEAD').stdout.strip()
+        if s.get('changed_files') and not s.get('commit') and head:
+            # Every task file is already clean: committed elsewhere. Record HEAD so status stops nagging.
+            with locked(root):
+                s = read(p / 'state.json')
+                s.update(commit=head, commit_note='dosyalar zaten temizdi (HEAD)', updated=now(), revision=s.get('revision', 0) + 1)
+                atomic(p / 'state.json', s)
+            out.append('Görev dosyaları zaten temiz; commit alanı HEAD olarak kaydedildi: ' + head)
         return '\n'.join(out + ['Commit edilecek değişiklik yok (changed_files boş ya da dosyalar temiz).'])
     out += ['Dosyalar:'] + ['  ' + f for f in files]
     for other in sorted((root / 'tasks').glob('*/state.json')):
@@ -365,8 +387,8 @@ def commit(root, ident, apply=False, force=False):
         return '\n'.join(out + ['DRY-RUN: hiçbir şey çalıştırılmadı; uygulamak için --apply (push yapılmaz).'])
     if not closed and not force:
         raise ValueError('Görev DONE/CLOSED değil; yine de commit için --force ver.')
-    staged = git(root, 'diff', '--cached', '--name-only', '--relative')
-    extra = sorted(set(staged.stdout.split()) - set(files))
+    staged = git(root, 'diff', '--cached', '--name-only', '--relative', '-z')
+    extra = sorted(set(staged.stdout.split('\0')) - set(files) - {''})
     if staged.returncode or extra:
         raise ValueError('Başka staged değişiklik var, commit yapılmadı: ' + ', '.join(extra or ['git hatası']))
     for c in cmds:
@@ -396,6 +418,36 @@ def risk_files(root, files):
 
 UI_WORDS=re.compile(r'\b(tasarım|tasarim|ekran|ui)\b',re.I)
 
+def project_files(root):
+    """Existing project files (relative); git-tracked + untracked when git is there, else a walk."""
+    r=subprocess.run(['git','-C',str(root),'ls-files','-co','--exclude-standard','-z'],capture_output=True)
+    if r.returncode==0: return [x for x in r.stdout.decode(errors='replace').split('\0') if x]
+    skip={'.git','.ai','tasks','roles','build','node_modules','.dart_tool'}
+    out=[]
+    for folder,dirs,files in os.walk(root):
+        dirs[:]=[d for d in dirs if d not in skip]
+        out+=[str((Path(folder)/n).relative_to(root)) for n in files]
+    return out
+
+def scope_hits_risk(root, scope, risk):
+    """Do the task's globs reach a risk glob? A literal path is matched as a path. A wildcard glob hits
+    when an existing file in it matches a risk glob, or a risk glob's directory lies inside it (future
+    files, e.g. lib/** vs lib/auth/**); a wildcard matching no file falls back to the coarse prefix check."""
+    rres=[glob_re(g) for g in risk]
+    pre=lambda g: re.split(r'[*?\[]',g,1)[0]
+    files=None
+    for g in scope:
+        if not re.search(r'[*?\[]',g):
+            if any(r.match(g) for r in rres): return True
+            continue
+        if '**' in g and any(pre(r) and pre(r).startswith(pre(g)) for r in risk): return True  # recursive scope only
+        if files is None: files=project_files(root)
+        sre=glob_re(g); hits=[x for x in files if sre.match(x)]
+        if hits:
+            if any(r.match(x) for x in hits for r in rres): return True
+        elif scopes_conflict([g],risk): return True
+    return False
+
 def suggest_profile(root, p=None, title=''):
     """(profile, reason) for `--profile auto`."""
     text=title+'\n'+((p/'TASK.md').read_text() if p and (p/'TASK.md').is_file() else '')
@@ -404,7 +456,7 @@ def suggest_profile(root, p=None, title=''):
     risk=runner_json(root).get('risk_paths') or []
     if not scope: return 'small','## Dosyalar kapsamı yok'
     if len(scope)>3: return 'small',f'kapsam {len(scope)} glob (>3)'
-    if risk and scopes_conflict(scope,risk): return 'small','kapsam risk_paths ile kesişiyor'
+    if risk and scope_hits_risk(root,scope,risk): return 'small','kapsam risk_paths ile kesişiyor'
     return 'fix',f'kapsam {len(scope)} glob, risk_paths dışı'
 
 def append_changelog(root, s):
@@ -448,7 +500,9 @@ def create(root, ident, title, profile='full', auto=False, files=None):
         for doc in DOCS:
             content=(ROOT/'templates/task'/ (doc+'.md')).read_text()
             content=content.replace('{{TASK_ID}}',ident).replace('{{TITLE}}',title).replace('{{PROFILE}}',profile)
-            if doc == 'TASK' and files: content = content.rstrip('\n') + '\n' + ''.join(f'- {g}\n' for g in files)
+            if doc == 'TASK' and files:  # a custom template may lack the section; the globs must land in it
+                content = content.rstrip('\n') + ('' if re.search(r'^## Dosyalar', content, re.M) else '\n\n## Dosyalar') \
+                    + '\n' + ''.join(f'- {g}\n' for g in files)
             (p / (doc+'.md')).write_text(content)
         atomic(p/'state.json', {**({'profile_choice': choice} if choice else {}),'task':ident,'title':title,'profile':profile,
                'stage_path':WORKFLOWS[profile],'stage':'NEW','created':now(),
@@ -461,7 +515,9 @@ def create(root, ident, title, profile='full', auto=False, files=None):
     return p
 
 def message(root, ident, sender, recipient, body):
-    task(root, ident)
+    p = task(root, ident)
+    if read(p / 'state.json').get('stage') in ('CLOSED', 'ABANDONED'):
+        raise ValueError('Görev kapalı; mesaj yazılmadı (yeni görev aç).')
     if sender not in ROLES or recipient not in ROLES:
         raise ValueError('Unknown role')
     msg={'id':str(uuid.uuid4()),'task':ident,'from':sender,'to':recipient,'created':now(),
@@ -474,16 +530,29 @@ class Blocked(ValueError):
 
 ENGINE_LABELS={'claude':'Claude Code','codex':'Codex'}
 
-def engine_of(e):
-    """claude|codex|other for an evidence record; old records only carry the display label."""
-    return e.get('engine_id') or {v:k for k,v in ENGINE_LABELS.items()}.get(e.get('engine'),'other')
+def metric_engines(root):
+    """{(task, role): engine} of the latest run per task/role in metrics (runner or backfill)."""
+    out={}
+    for r in sorted(load_metrics(root),key=lambda r:r.get('ts_start') or r.get('ts') or ''):
+        if r.get('type')=='run' and r.get('engine') in ('claude','codex','other'): out[(r.get('task'),r.get('role'))]=r['engine']
+    return out
 
-def independence(s):
+def engine_of(e, engines=None, task=None):
+    """claude|codex|other, or 'unknown': old records' display label is not trusted
+    (the verifier was always labelled Codex, even when Claude ran it), so they fall back to metrics."""
+    return e.get('engine_id') or (engines or {}).get((task,e.get('role'))) or 'unknown'
+
+def independence(s, engines=None):
+    if s.get('independence') in ('independent','single-model','unknown'): return s['independence']  # fixed at DONE
     t,v=s.get('claude_test'),s.get('codex_verify')
-    return 'independent' if t and v and engine_of(t)!=engine_of(v) else 'single-model'
+    if not (t and v): return 'single-model'
+    a,b=engine_of(t,engines,s.get('task')),engine_of(v,engines,s.get('task'))
+    return 'unknown' if 'unknown' in (a,b) else 'independent' if a!=b else 'single-model'
 
-def pass_label(s):
-    return 'PASS/PASS (bağımsız)' if independence(s)=='independent' else 'PASS (tek model)'
+INDEPENDENCE_LABELS={'independent':'PASS/PASS (bağımsız)','single-model':'PASS (tek model)','unknown':'PASS (bağımsızlık bilinmiyor)'}
+
+def pass_label(s, engines=None):
+    return INDEPENDENCE_LABELS[independence(s,engines)]
 
 def evidence(root, p, s, role, result, session, note, engine=None, model=None):
     required={'tester':('TEST_CLAUDE','TEST_CLAUDE.md','claude_test'),
@@ -533,11 +602,16 @@ def advance(root,p,s,stage):
             if not e or e['result']!='PASS' or e.get('production_fingerprint',e['fingerprint'])!=fp or e['report_sha256']!=hashlib.sha256((p/file).read_bytes()).hexdigest():
                 raise ValueError('Missing, failed or stale evidence: '+key)
     if stage=='DONE' and s.get('profile')=='fix':
-        risky=risk_files(root,s.get('changed_files') or [])
-        if risky:
+        # Raw change list: out-of-scope edits count too, otherwise a scope filter would hide a risky edit.
+        risky=risk_files(root,sorted(set(s.get('changed_files') or [])|set(s.get('out_of_scope_changes') or [])))
+        reason='risk_paths'
+        # Without git nothing records what changed; with risk_paths configured, escalate (safe side).
+        if not risky and runner_json(root).get('risk_paths') and git_changes(root) is None:
+            reason='no-git'
+        if risky or reason=='no-git':
             # A fix that touched risk_paths gets the independent verifier and knowledge stages of `small`.
             s.update(profile='small',stage_path=WORKFLOWS['small'],stage='VERIFY_CODEX',
-                     escalated={'reason':'risk_paths','files':risky,'at':now()})
+                     escalated={'reason':reason,'files':risky,'at':now()})
             return
     if stage=='DONE':
         if any(g['status']!='RESOLVED_BY_LEAD' for g in s['gates']):
@@ -552,10 +626,10 @@ def advance(root,p,s,stage):
         if 'VERIFY_CODEX' in path and 'STATUS: NOT_RUN' in (p/'FINAL_REPORT.md').read_text():
             raise ValueError('Final report is not written.')
         if (runner_json(root).get('require_independent_verifier') and s.get('profile')!='fix'
-                and independence(s)=='single-model'):
+                and independence(s,metric_engines(root))!='independent'):
             raise Blocked('Bağımsız doğrulayıcı zorunlu (runner.json require_independent_verifier): tester ve '
                           'verifier aynı motor; verifier\'ı farklı motorla yeniden çalıştır.')
-        s['independence']=independence(s)
+        s['independence']=independence(s,metric_engines(root))
     s['stage']=stage
     if stage=='DONE':
         s['done_at']=now()
@@ -565,7 +639,8 @@ STATUS_GROUPS=('Seni bekliyor','Çalışıyor','Limit bekliyor','Sırada (auto)'
 
 def status_summary(root):
     """Short grouped view of what needs attention; closed tasks are hidden."""
-    groups={g:[] for g in STATUS_GROUPS}
+    groups={g:[] for g in STATUS_GROUPS}; warns=[]
+    dirty=None; engines=None  # computed lazily: only DONE rows need git/metrics
     for f in sorted((root/'tasks').glob('*/state.json')):
         ident=f.parent.name
         try: s=read(f)
@@ -575,19 +650,24 @@ def status_summary(root):
         row=lambda m: f'{ident} {st} — {" ".join(str(m or "").split())[:90]}'.rstrip(' —')
         if st=='DONE':
             if s.get('changed_files') and not s.get('commit'):
-                groups['Commit bekliyor'].append(row(f'{len(s["changed_files"])} dosya · {pass_label(s)} · team commit {ident}'))
+                if dirty is None: dirty=git_changes(root) or {}; engines=metric_engines(root)
+                pending=[x for x in s['changed_files'] if x in dirty]  # already-clean files need no commit
+                if pending: groups['Commit bekliyor'].append(row(f'{len(pending)} dosya · {pass_label(s,engines)} · team commit {ident}'))
             continue
         if st in CLOSED_STAGES: continue
+        if s.get('out_of_scope_changes'):
+            warns.append(f'UYARI: {ident} kapsam dışı değişiklik: '+', '.join(s['out_of_scope_changes'][:5])
+                         +(' …' if len(s['out_of_scope_changes'])>5 else ''))
         # WAITING_FOR_LEAD is stale once Lead advanced past NEW; the runner refreshes it on its next round.
         if st=='NEW' or status in ('AWAITING_USER','BLOCKED') or not a.get('enabled'):
             groups['Seni bekliyor'].append(row(a.get('message') if a.get('enabled') else (a.get('message') or 'otomasyon kapalı')))
         elif status=='RUNNING': groups['Çalışıyor'].append(row(f'{a.get("role")} · {a.get("message") or ""}'))
         elif status=='WAITING_LIMIT': groups['Limit bekliyor'].append(row(f'retry_at {str(a.get("retry_at"))[:16]} · {a.get("message") or ""}'))
         else: groups['Sırada (auto)'].append(row(a.get('message') if status!='WAITING_FOR_LEAD' else 'runner bekliyor'))
-    out=[]
+    out=list(warns)
     for g,rows in groups.items():
         if rows: out+=[f'{g} ({len(rows)})']+['  '+r for r in rows]
-    return '\n'.join(out) or 'Açık görev yok.'
+    return '\n'.join(out) if any(groups.values()) else '\n'.join(warns+['Açık görev yok.'])
 
 def metric(root, row):
     """Append one line to .ai/metrics.jsonl (O_APPEND, no lock: callers may already hold the team lock)."""
@@ -597,11 +677,24 @@ def metric(root, row):
     except OSError:
         pass  # metrics never break the workflow
 
+TOKEN_KEYS=('input','output','cache_read','cache_creation')
+
+def _num(v):
+    return v if isinstance(v,(int,float)) and not isinstance(v,bool) else None
+
 def load_metrics(root):
+    """Metric rows with defensive types: non-dict lines are dropped, bad fields become None/0."""
     f=root/'.ai'/'metrics.jsonl'; rows=[]
     for line in (f.read_text(errors='replace').splitlines() if f.is_file() else []):
-        try: rows.append(json.loads(line))
+        try: r=json.loads(line)
         except ValueError: continue
+        if not isinstance(r,dict): continue
+        for k in ('ts','ts_start','ts_end','task','role','model','engine','result','type','run_id','cmd'):
+            if k in r and not isinstance(r[k],str): r[k]=None
+        tok=r.get('tokens')
+        r['tokens']={k:_num(tok.get(k)) or 0 for k in TOKEN_KEYS} if isinstance(tok,dict) else None
+        r['cost_usd']=_num(r.get('cost_usd')); r['duration_s']=_num(r.get('duration_s')) or 0
+        rows.append(r)
     return rows
 
 def log_usage(path):
@@ -646,10 +739,12 @@ def backfill(root):
         born=getattr(st,'st_birthtime',0)
         start=dt.datetime.fromtimestamp(born,dt.timezone.utc) if born else None
         if not start or start>end: start=end-dt.timedelta(seconds=u['duration_s'] or 0)
-        with f.open('rb') as h: head=h.read(4096)
+        with f.open('rb') as h: head=h.read(16384)
+        # Engine from the event format itself: Codex emits thread.started, Claude stream-json system/result.
+        engine='codex' if b'"thread.started"' in head else 'claude' if (b'"type":"system"' in head or b'"type":"result"' in head) else None
         metric(root,{'type':'run','backfill':True,'ts':start.isoformat(),'ts_start':start.isoformat(),'ts_end':end.isoformat(),
                      'duration_s':round((end-start).total_seconds(),1),'task':f.parent.name,'role':m.group(1),
-                     'run_id':m.group(2),'engine':'codex' if b'thread.started' in head else 'claude',
+                     'run_id':m.group(2),'engine':engine,
                      'model':u['model'],'result':None,'rework_no':None,'tokens':u['tokens'],'cost_usd':u['cost_usd']})
         known.add(m.group(2)); added+=1
     return f'backfill: {added} satır eklendi ({root/".ai"/"metrics.jsonl"})'
@@ -676,8 +771,8 @@ def budget_state(root):
         lim=cfg.get(key)
         if not lim: continue
         pct=val/lim*100
-        if pct>=100: full=True; lines.append(f'Bütçe AŞILDI: {label} ${val:.2f} / ${lim:.2f} (%{pct:.0f})')
-        elif pct>=80: lines.append(f'Bütçe UYARI: {label} ${val:.2f} / ${lim:.2f} (%{pct:.0f}, %80 eşiği)')
+        if pct>=100: full=True; lines.append(f'Bütçe AŞILDI: {label} ${val:.2f} / ${lim:.2f} (%{int(pct)})')
+        elif pct>=80: lines.append(f'Bütçe UYARI: {label} ${val:.2f} / ${lim:.2f} (%{int(pct)}, %80 eşiği)')
     try: resumed=read(root/'.ai'/'budget.json').get('resumed_on')==str(utcnow().astimezone().date())
     except (OSError,ValueError): resumed=False
     paused=full and cfg.get('action')=='pause' and not resumed
@@ -694,7 +789,7 @@ def task_over_budget(root, ident, s):
 
 def budget_text(root):
     b=budget_state(root); c=b['cfg']; sp=b['spend']
-    lim=lambda v,k: f'${v:.2f} / ${c[k]:.2f} (%{v/c[k]*100:.0f})' if c.get(k) else f'${v:.2f} (limit kapalı)'
+    lim=lambda v,k: f'${v:.2f} / ${c[k]:.2f} (%{int(v/c[k]*100)})' if c.get(k) else f'${v:.2f} (limit kapalı)'
     top=max(sp['tasks'].items(),key=lambda kv:kv[1],default=None)
     out=[f'Bütçe (action={c.get("action")})','  bugün: '+lim(sp['today'],'daily_usd'),'  bu hafta: '+lim(sp['week'],'weekly_usd'),
          f'  bu ay: ${sp["month"]:.2f}',f'  görev limiti: '+(f'${c["task_usd"]:.2f}' if c.get('task_usd') else 'kapalı')
@@ -706,12 +801,12 @@ def dashboard_data(roots):
     for root in roots:
         try: name=str(read(root/'.ai/project.json').get('id') or root.name)
         except (OSError,ValueError): name=root.name
-        rows=load_metrics(root); tasks={}
+        rows=load_metrics(root); tasks={}; engines=metric_engines(root)
         for f in sorted((root/'tasks').glob('*/state.json')):
             try: s=read(f)
             except (OSError,ValueError): continue
             tasks[f.parent.name]={'profile':s.get('profile'),'stage':s.get('stage'),'rework':s.get('rework_count',0),
-                                  'independence':independence(s) if s.get('stage')=='DONE' else None}
+                                  'independence':independence(s,engines) if s.get('stage')=='DONE' else None}
         runs=[{'t':r.get('ts_start') or r.get('ts'),'task':r.get('task'),'role':r.get('role'),'model':r.get('model') or '-',
                'dur':r.get('duration_s') or 0,'result':r.get('result'),'usd':r.get('cost_usd'),
                'tok':[(r.get('tokens') or {}).get(k) or 0 for k in ('input','output','cache_read','cache_creation')]}
@@ -722,7 +817,8 @@ def dashboard_data(roots):
     return {'generated':now(),'projects':projects}
 
 def dashboard_html(roots):
-    data=json.dumps(dashboard_data(roots),ensure_ascii=False).replace('</','<\\/')
+    # \u escapes keep any '<', '>' or '&' in data from ending the <script> element.
+    data=json.dumps(dashboard_data(roots),ensure_ascii=False).replace('<','\\u003c').replace('>','\\u003e').replace('&','\\u0026')
     return (Path(__file__).resolve().parent.parent/'templates'/'dashboard.html').read_text().replace('__DATA__',data)
 
 def dashboard(roots, out=None, open_=False, serve=None):
@@ -767,8 +863,8 @@ def report(root, days=None, ident=None):
     by_profile={}
     for s,_ in closed: by_profile[s.get('profile','?')]=by_profile.get(s.get('profile','?'),0)+1
     stages={k:sum(s['stage']==k for s,_ in closed) for k in CLOSED_STAGES}
-    out.append(f'Kapanan görev: {len(closed)} ('+', '.join(f'{k} {v}' for k,v in sorted(by_profile.items()))+') · '
-               +', '.join(f'{k} {v}' for k,v in stages.items()))
+    out.append(f'Kapanan görev: {len(closed)}'+(' ('+', '.join(f'{k} {v}' for k,v in sorted(by_profile.items()))+')' if by_profile else '')
+               +' · '+', '.join(f'{k} {v}' for k,v in stages.items()))
     spans=[]
     for s,at in closed:
         try:
@@ -776,12 +872,12 @@ def report(root, days=None, ident=None):
         except (KeyError,TypeError,ValueError): pass
     if spans: out.append(f'NEW→DONE: ort {_minutes(statistics.mean(spans))}, medyan {_minutes(statistics.median(spans))} ({len(spans)} görev)')
     roles={}
-    for r in runs: roles.setdefault(r.get('role','?'),[]).append(r.get('duration_s') or 0)
+    for r in runs: roles.setdefault(r.get('role') or '?',[]).append(r.get('duration_s') or 0)
     if roles: out.append('Rol süresi (ort/medyan): '+' · '.join(
         f'{k} {_minutes(statistics.mean(v))}/{_minutes(statistics.median(v))} ({len(v)})' for k,v in sorted(roles.items())))
     table={}
     for r in runs:
-        k=(r.get('role','?'),r.get('model') or '-'); a=table.setdefault(k,[0,0,0,0,0,None])
+        k=(r.get('role') or '?',r.get('model') or '-'); a=table.setdefault(k,[0,0,0,0,0,None])
         a[0]+=1
         for i,key in enumerate(('input','output','cache_read','cache_creation'),1): a[i]+=(r.get('tokens') or {}).get(key) or 0
         if r.get('cost_usd') is not None: a[5]=(a[5] or 0)+r['cost_usd']
@@ -792,7 +888,7 @@ def report(root, days=None, ident=None):
         cost=sum(a[5] or 0 for a in table.values()); out.append(f'Toplam maliyet: ${cost:.2f} (Codex satırlarında maliyet yok)')
     if closed: out.append(f'Rework ortalaması: {statistics.mean(s.get("rework_count",0) for s,_ in closed):.2f}')
     out.append(f'Müdahale: {sum(r.get("type")=="intervention" for r in rows)}')
-    wait=0.0; ordered=sorted(runs,key=lambda r:r.get('ts_start',''))
+    wait=0.0; ordered=sorted(runs,key=lambda r:r.get('ts_start') or '')
     for i,r in enumerate(ordered):
         if r.get('result')!='limit': continue
         nxt=next((n for n in ordered[i+1:] if n.get('task')==r.get('task') and n.get('role')==r.get('role')),None)
@@ -800,8 +896,9 @@ def report(root, days=None, ident=None):
         except (KeyError,TypeError,ValueError): pass
     out.append(f'Limit bekleme: {_minutes(wait)}')
     done=[s for s,_ in closed if s['stage']=='DONE']
-    ind=sum(independence(s)=='independent' for s in done)
-    if done: out.append(f'Doğrulama: bağımsız {ind} / tek model {len(done)-ind} (%{100*ind//len(done)} bağımsız)')
+    engines=metric_engines(root); kinds=[independence(s,engines) for s in done]
+    ind,one,unk=(kinds.count(k) for k in ('independent','single-model','unknown'))
+    if done: out.append(f'Doğrulama: bağımsız {ind} / tek model {one} / bilinmiyor {unk} (%{100*ind//len(done)} bağımsız)')
     return '\n'.join(out)
 
 def role_prompt(root, role, ident=None):

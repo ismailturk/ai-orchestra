@@ -322,6 +322,22 @@ class RunnerTests(unittest.TestCase):
             self.assertIn('Restart=always', unit.read_text()); self.assertIn('systemctl --user enable --now', out)
             ran.assert_not_called()  # never runs launchctl/systemctl itself
 
+    def test_watch_waits_for_held_runner_lock_instead_of_exiting(self):
+        import fcntl, io, contextlib
+        held = (self.root/'.ai/.runner.lock').open('a'); fcntl.flock(held, fcntl.LOCK_EX)
+        got, log = team_runner.threading.Event(), io.StringIO()
+        with self.assertRaises(RuntimeError), team_runner.runner_lock(self.root):
+            pass  # `once` still fails fast
+        def watcher():
+            with team_runner.runner_lock(self.root, wait=True):
+                got.set()
+        with patch.object(team_runner, 'LOCK_RETRY_SECONDS', 0.05), contextlib.redirect_stdout(log):
+            th = team_runner.threading.Thread(target=watcher); th.start()
+            team_runner.time.sleep(0.3); self.assertFalse(got.is_set())
+            fcntl.flock(held, fcntl.LOCK_UN); held.close(); th.join(5)
+        self.assertTrue(got.is_set())
+        self.assertEqual(log.getvalue().count('Başka bir Team Runner çalışıyor'), 1)  # one line, not per retry
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
