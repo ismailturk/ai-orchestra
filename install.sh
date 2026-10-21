@@ -17,6 +17,18 @@ wrap team-runner "$DIR/bin/team_runner.py"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) echo "UYARI: $BIN_DIR PATH'te degil. ~/.zshrc'ye ekle: export PATH=\"\$HOME/.local/bin:\$PATH\"";; esac
 for t in claude codex git; do command -v "$t" >/dev/null && echo "ok  $t" || echo "UYARI: $t bulunamadi"; done
 
+# Claude becerileri: ~/.claude/skills/<ad>/ (farkli icerik varsa .bak yedegi alinir)
+for sd in "$DIR"/skills/*/; do
+  [ -d "$sd" ] || continue
+  n="$(basename "$sd")"; T="$HOME/.claude/skills/$n"; mkdir -p "$T"
+  for f in "$sd"*; do
+    b="$(basename "$f")"
+    if [ -f "$T/$b" ] && ! cmp -s "$f" "$T/$b"; then cp "$T/$b" "$T/$b.bak"; echo "UYARI: $T/$b degisti, yedek: $b.bak"; fi
+    cp "$f" "$T/$b"
+  done
+  echo "ok  skill $n -> $T"
+done
+
 if [ "$RULES" = 1 ]; then
   F="$HOME/.claude/CLAUDE.md"; mkdir -p "$HOME/.claude"
   if [ -f "$F" ] && grep -q 'ai-team-core' "$F"; then echo "ok  $F zaten isaretli"

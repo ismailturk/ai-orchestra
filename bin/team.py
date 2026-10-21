@@ -49,18 +49,39 @@ def load_projects():
     f=projects_file()
     return read(f) if f.is_file() else {}
 
-def init_project(root):
-    """Create missing .ai defaults in an existing project dir; never overwrites."""
+def init_project(root,dry_run=False):
+    """Create the missing ai-orchestra skeleton in an existing project dir; never touches existing files."""
     root=Path(root).expanduser().resolve()
     if not root.is_dir(): raise ValueError('Not a directory: '+str(root))
-    made=[]
-    for name,data in (('models.json',DEFAULT_MODELS),('runner.json',DEFAULT_RUNNER)):
-        f=root/'.ai'/name
-        if not f.exists(): atomic(f,data); made.append('.ai/'+name)
-    f=root/'.ai/PROJECT.md'
-    if not f.exists():
-        f.write_text('# '+root.name+'\n\nProje tanımı: hedef, yığın, kapsam, DB/yüksek etki sınırları.\n'); made.append('.ai/PROJECT.md')
-    return 'init '+str(root)+': '+(', '.join(made) if made else 'nothing to create')
+    made=[];skipped=[];notes=[]
+    tpl=ROOT/'templates'
+    def put(rel,text=None,data=None):
+        f=root/rel
+        if f.exists() or f.is_symlink(): skipped.append(rel); return
+        made.append(rel)
+        if dry_run: return
+        if data is not None: atomic(f,data)
+        else: f.parent.mkdir(parents=True,exist_ok=True); f.write_text(text)
+    for name,data in (('models.json',DEFAULT_MODELS),('runner.json',DEFAULT_RUNNER)): put('.ai/'+name,data=data)
+    for f in sorted((tpl/'project/ai').glob('*.md')):
+        text=f.read_text()
+        if f.name=='PROJECT.md': text=text.replace('# Proje\n','# '+root.name+'\n',1)
+        put('.ai/'+f.name,text)
+    for f in sorted((tpl/'roles').glob('*.md')): put('roles/'+f.name,f.read_text())
+    cm=root/'CLAUDE.md'
+    if cm.is_file() and 'ai-orchestra' in cm.read_text(errors='ignore'): skipped.append('CLAUDE.md')
+    elif cm.exists(): notes.append('CLAUDE.md mevcut; ai-orchestra satirini elle ekleyin: '+(tpl/'project/CLAUDE.md').read_text().split('\n')[1])
+    else: put('CLAUDE.md',(tpl/'project/CLAUDE.md').read_text())
+    put('AGENTS.md',(tpl/'project/AGENTS.md').read_text())
+    for d in ['tasks']+['.ai/messages/'+r for r in ROLES]:
+        if (root/d).is_dir(): skipped.append(d+'/')
+        else:
+            made.append(d+'/')
+            if not dry_run: (root/d).mkdir(parents=True,exist_ok=True)
+    out=['init '+str(root)+(' (dry-run, yazilmadi)' if dry_run else '')]
+    out+=['  olusturuldu: '+m for m in made]+['  atlandi (var): '+m for m in skipped]+['  UYARI: '+n for n in notes]
+    if not made: out.append('nothing to create')
+    return '\n'.join(out)
 
 def doctor(root=None):
     """Short environment report; returns (lines, ok)."""
@@ -455,9 +476,9 @@ def main():
     q=sub.add_parser('resolve-gate'); q.add_argument('id'); q.add_argument('gate_id'); q.add_argument('--user-message-ref',required=True); q.add_argument('--outcome',choices=['cancelled','user-applied','explicitly-approved'],required=True)
     q=sub.add_parser('launch'); q.add_argument('role',choices=ROLES); q.add_argument('--task'); q.add_argument('--dry-run',action='store_true'); q.add_argument('--instruction')
     q=sub.add_parser('automate'); q.add_argument('id'); mode=q.add_mutually_exclusive_group(required=True); mode.add_argument('--enable',action='store_true'); mode.add_argument('--disable',action='store_true'); mode.add_argument('--resume',action='store_true')
-    sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); sub.add_parser('update')
+    sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
     args=a.parse_args()
-    if args.cmd=='init': print(init_project(args.path or args.project)); return
+    if args.cmd=='init': print(init_project(args.path or args.project,args.dry_run)); return
     if args.cmd=='update': print(update()); return
     if args.cmd=='doctor':
         pr=Path(args.project).expanduser().resolve()

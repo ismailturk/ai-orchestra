@@ -568,6 +568,35 @@ class PortabilityTests(unittest.TestCase):
             self.assertEqual(json.loads((Path(d)/'.ai/runner.json').read_text())['max_parallel'],3)
             self.assertIn('nothing to create',team.init_project(d))
 
+    def test_init_full_skeleton_idempotent_and_dry_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            d=Path(d); team.init_project(d,dry_run=True); self.assertEqual(list(d.iterdir()),[])
+            team.init_project(d)
+            for f in ['CLAUDE.md','AGENTS.md','.ai/PROJECT.md','.ai/OWNERSHIP.md','.ai/CURRENT_STATE.md','.ai/KNOWN_ISSUES.md','.ai/DECISIONS.md','.ai/TEAM_RULES.md','.ai/models.json','.ai/runner.json']+['roles/%s.md'%r for r in team.ROLES]:
+                self.assertTrue((d/f).is_file(),f)
+            for r in team.ROLES: self.assertTrue((d/'.ai/messages'/r).is_dir())
+            self.assertTrue((d/'tasks').is_dir())
+            snap={p:p.read_bytes() for p in d.rglob('*') if p.is_file()}
+            self.assertIn('nothing to create',team.init_project(d))
+            self.assertEqual(snap,{p:p.read_bytes() for p in d.rglob('*') if p.is_file()})
+
+    def test_init_keeps_existing_claude_md_and_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d)/'CLAUDE.md').write_text('mine')
+            out=team.init_project(d)
+            self.assertEqual((Path(d)/'CLAUDE.md').read_text(),'mine'); self.assertIn('CLAUDE.md mevcut',out)
+
+    def test_install_copies_skills_and_backs_up_changed(self):
+        with tempfile.TemporaryDirectory() as h:
+            env={**__import__('os').environ,'HOME':h}
+            run=lambda: subprocess.run(['bash',str(team.ROOT/'install.sh')],env=env,capture_output=True,text=True)
+            self.assertEqual(run().returncode,0)
+            f=Path(h)/'.claude/skills/orchestra-setup/SKILL.md'
+            self.assertIn('name: orchestra-setup',f.read_text())
+            f.write_text('edited'); out=run()
+            self.assertIn('SKILL.md.bak',out.stdout); self.assertEqual((f.parent/'SKILL.md.bak').read_text(),'edited')
+            self.assertIn('name: orchestra-setup',f.read_text())
+
     def test_doctor_reports_project_files(self):
         with tempfile.TemporaryDirectory() as d:
             team.init_project(d)

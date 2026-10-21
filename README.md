@@ -23,12 +23,18 @@ team doctor
 ```
 `team` ve `team-runner` komutları `~/.local/bin` altına kurulur. Güncelleme: `team update` (yalnız `git pull --ff-only`).
 
-## Yeni projeye bağlama
+## Yeni projede kurulum
+```
+cd /yol/proje && claude
+> bu projede gerekli kurulumları yap        # ya da /orchestra-setup
+```
+`orchestra-setup` becerisi (install.sh kurar) `team doctor`, `team init`, salt okunur proje incelemesi ve yetki sorularını yürütür; DB/deploy/push yapmaz, commit atmaz. Elle yol:
 ```
 cd /yol/proje
-team init [yol]   # eksik .ai/PROJECT.md, models.json, runner.json oluşturur; varsa dokunmaz
+team init --dry-run   # ne oluşacağını göster
+team init             # .ai/*.md, .ai/messages/<rol>/, roles/*.md, tasks/, CLAUDE.md, AGENTS.md, models.json, runner.json; var olan dosyaya dokunmaz
 ```
-Ardından `ONBOARDING.md` adımlarıyla `.ai/PROJECT.md`, `OWNERSHIP.md`, `CURRENT_STATE.md`, `roles/` ve `tasks/` yapısını kur. Proje yollarını `~/.config/ai-team/projects.json` içine yaz (örnek: `projects.example.json`). Kurallar projede `.ai/TEAM_RULES.md` olarak bulunabilir (projeye özel istisnalar yalnız orada); yoksa bu depodaki `TEAM_RULES.md` yedek olarak okunur.
+Mevcut `CLAUDE.md` değiştirilmez; ai-orchestra satırını elle eklemen için uyarı basılır. Ardından `.ai/PROJECT.md`, `OWNERSHIP.md`, `CURRENT_STATE.md` doldurulur (bkz. `ONBOARDING.md`). İstersen proje yollarını `~/.config/ai-team/projects.json` içine yaz (örnek: `projects.example.json`). Projeye özel istisnalar yalnız projedeki `.ai/TEAM_RULES.md` içinde olur; yoksa bu depodaki `TEAM_RULES.md` yedek olarak okunur.
 
 ## Temel komutlar
 ```
