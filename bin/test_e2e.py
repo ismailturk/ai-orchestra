@@ -147,6 +147,14 @@ class E2E(unittest.TestCase):
         self.assertEqual(s['changed_files'], ['src/APP-001.txt'])
         self.assertEqual(s['independence'], 'independent')
         self.assertEqual(s['codex_verify']['engine_id'], 'codex'); self.assertEqual(s['claude_test']['engine_id'], 'claude')
+        runs = [m for m in self.metrics() if m['type'] == 'run']
+        self.assertEqual([m['role'] for m in runs], ['developer', 'tester', 'verifier', 'lead'])
+        self.assertEqual(runs[0]['tokens']['cache_read'], 300); self.assertEqual(runs[0]['cost_usd'], 0.01)
+        self.assertEqual((runs[2]['tokens']['input'], runs[2]['tokens']['cache_read']), (100, 400))
+        self.assertIsNone(runs[2]['cost_usd']); self.assertEqual(runs[2]['engine'], 'codex')
+        self.assertFalse([m for m in self.metrics() if m['type'] == 'intervention'])  # runner flow only
+        rep = team.report(self.root)
+        self.assertIn('Kapanan görev: 1 (small 1)', rep); self.assertIn('bağımsız 1 / tek model 0', rep)
         self.assertIn('PASS/PASS (bağımsız)', self.log.getvalue())
 
     def test_b_fix_done_changelog_and_risk_escalation(self):
@@ -175,6 +183,7 @@ class E2E(unittest.TestCase):
         os.environ['TEAM_NOW_OFFSET'] = str(offset)  # time passes without waiting
         self.drive()
         self.assertEqual(self.state(ident)['stage'], 'DONE', self.log.getvalue())
+        self.assertIn('limit', [m['result'] for m in self.metrics() if m['type'] == 'run'])
 
     def test_c_session_limit_waits_until_reset_then_finishes(self):
         self.wait_then_resume('APP-004', 'limit', 2 * 86400)
@@ -189,6 +198,7 @@ class E2E(unittest.TestCase):
         self.assertEqual(s['automation']['status'], 'BLOCKED')
         self.assertEqual(s['rework_count'], 4)
         self.assertIn('3 düzeltme turu aşıldı', s['automation']['message'])
+        self.assertEqual(sum(m['role'] == 'developer' for m in self.metrics() if m['type'] == 'run'), 4)
 
     def test_f_crashed_role_blocks_only_its_task(self):
         self.task('APP-007', plan={'developer': 'crash'})
@@ -197,6 +207,7 @@ class E2E(unittest.TestCase):
         s = self.state('APP-007')
         self.assertEqual(s['automation']['status'], 'BLOCKED'); self.assertIn('137', s['automation']['message'])
         self.assertEqual(self.state('APP-008')['stage'], 'DONE')
+        self.assertIn('crash', [m['result'] for m in self.metrics() if m['task'] == 'APP-007'])
 
     def test_g_disjoint_scoped_developers_start_together(self):
         self.task('APP-009', scope=['lib/a/**'], files=['lib/a/x.txt'])

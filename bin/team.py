@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -582,6 +583,105 @@ def status_summary(root):
         if rows: out+=[f'{g} ({len(rows)})']+['  '+r for r in rows]
     return '\n'.join(out) or 'Açık görev yok.'
 
+def metric(root, row):
+    """Append one line to .ai/metrics.jsonl (O_APPEND, no lock: callers may already hold the team lock)."""
+    try:
+        with (root/'.ai'/'metrics.jsonl').open('a') as f:
+            f.write(json.dumps({'ts':now(),**row},ensure_ascii=False)+'\n')
+    except OSError:
+        pass  # metrics never break the workflow
+
+def load_metrics(root):
+    f=root/'.ai'/'metrics.jsonl'; rows=[]
+    for line in (f.read_text(errors='replace').splitlines() if f.is_file() else []):
+        try: rows.append(json.loads(line))
+        except ValueError: continue
+    return rows
+
+def log_usage(path):
+    """Token usage from a role log: Claude stream-json `result` or Codex `turn.completed` events.
+
+    `input` is uncached input on both engines (Codex input_tokens includes cached_input_tokens).
+    Codex logs carry no cost, so cost_usd stays None for them.
+    """
+    tok={'input':0,'output':0,'cache_read':0,'cache_creation':0}; out={'tokens':None,'cost_usd':None,'model':None,'duration_s':None}
+    try: lines=Path(path).read_text(errors='replace').splitlines()
+    except OSError: return out
+    for line in lines:
+        if not line.startswith('{'): continue
+        try: e=json.loads(line)
+        except ValueError: continue
+        u=e.get('usage') if isinstance(e,dict) else None
+        if not isinstance(u,dict) or e.get('type') not in ('result','turn.completed'): continue
+        out['tokens']=tok
+        if e['type']=='result':
+            tok['input']+=u.get('input_tokens') or 0; tok['output']+=u.get('output_tokens') or 0
+            tok['cache_read']+=u.get('cache_read_input_tokens') or 0; tok['cache_creation']+=u.get('cache_creation_input_tokens') or 0
+            if e.get('total_cost_usd') is not None: out['cost_usd']=(out['cost_usd'] or 0)+e['total_cost_usd']
+            if e.get('duration_ms'): out['duration_s']=(out['duration_s'] or 0)+e['duration_ms']/1000
+            out['model']=next(iter(e.get('modelUsage') or {}),out['model'])
+        else:
+            cached=u.get('cached_input_tokens') or 0
+            tok['input']+=max((u.get('input_tokens') or 0)-cached,0); tok['output']+=u.get('output_tokens') or 0
+            tok['cache_read']+=cached; tok['cache_creation']+=u.get('cache_write_input_tokens') or 0
+    return out
+
+def _minutes(seconds):
+    return f'{seconds/60:.1f} dk'
+
+def report(root, days=None, ident=None):
+    since=(utcnow()-dt.timedelta(days=days)).isoformat() if days else ''
+    rows=[r for r in load_metrics(root) if (r.get('ts_start') or r.get('ts') or '')>=since and (not ident or r.get('task')==ident)]
+    runs=[r for r in rows if r.get('type')=='run']
+    closed=[]
+    for f in sorted((root/'tasks').glob('*/state.json')):
+        try: s=read(f)
+        except (OSError,ValueError): continue
+        at=s.get('done_at') or (s.get('closed') or {}).get('at') or s.get('updated') or ''
+        if s.get('stage') in CLOSED_STAGES and at>=since and (not ident or f.parent.name==ident): closed.append((s,at))
+    if not runs and not closed:
+        return 'Rapor: veri yok (henüz .ai/metrics.jsonl satırı ya da kapanan görev yok).'
+    out=[f'Rapor: {"son "+str(days)+" gün" if days else "tüm zamanlar"}'+(f' · görev {ident}' if ident else '')]
+    by_profile={}
+    for s,_ in closed: by_profile[s.get('profile','?')]=by_profile.get(s.get('profile','?'),0)+1
+    stages={k:sum(s['stage']==k for s,_ in closed) for k in CLOSED_STAGES}
+    out.append(f'Kapanan görev: {len(closed)} ('+', '.join(f'{k} {v}' for k,v in sorted(by_profile.items()))+') · '
+               +', '.join(f'{k} {v}' for k,v in stages.items()))
+    spans=[]
+    for s,at in closed:
+        try:
+            if s['stage']=='DONE': spans.append((dt.datetime.fromisoformat(at)-dt.datetime.fromisoformat(s['created'])).total_seconds())
+        except (KeyError,TypeError,ValueError): pass
+    if spans: out.append(f'NEW→DONE: ort {_minutes(statistics.mean(spans))}, medyan {_minutes(statistics.median(spans))} ({len(spans)} görev)')
+    roles={}
+    for r in runs: roles.setdefault(r.get('role','?'),[]).append(r.get('duration_s') or 0)
+    if roles: out.append('Rol süresi (ort/medyan): '+' · '.join(
+        f'{k} {_minutes(statistics.mean(v))}/{_minutes(statistics.median(v))} ({len(v)})' for k,v in sorted(roles.items())))
+    table={}
+    for r in runs:
+        k=(r.get('role','?'),r.get('model') or '-'); a=table.setdefault(k,[0,0,0,0,0,None])
+        a[0]+=1
+        for i,key in enumerate(('input','output','cache_read','cache_creation'),1): a[i]+=(r.get('tokens') or {}).get(key) or 0
+        if r.get('cost_usd') is not None: a[5]=(a[5] or 0)+r['cost_usd']
+    if table:
+        out.append(f'{"rol":<10} {"model":<18} {"çalışma":>7} {"input":>10} {"output":>10} {"cache_read":>12} {"cache_write":>11} {"$":>8}')
+        for (role,model),a in sorted(table.items()):
+            out.append(f'{role:<10} {model[:18]:<18} {a[0]:>7} {a[1]:>10} {a[2]:>10} {a[3]:>12} {a[4]:>11} '+(f'{a[5]:>8.2f}' if a[5] is not None else f'{"-":>8}'))
+        cost=sum(a[5] or 0 for a in table.values()); out.append(f'Toplam maliyet: ${cost:.2f} (Codex satırlarında maliyet yok)')
+    if closed: out.append(f'Rework ortalaması: {statistics.mean(s.get("rework_count",0) for s,_ in closed):.2f}')
+    out.append(f'Müdahale: {sum(r.get("type")=="intervention" for r in rows)}')
+    wait=0.0; ordered=sorted(runs,key=lambda r:r.get('ts_start',''))
+    for i,r in enumerate(ordered):
+        if r.get('result')!='limit': continue
+        nxt=next((n for n in ordered[i+1:] if n.get('task')==r.get('task') and n.get('role')==r.get('role')),None)
+        try: wait+=max((dt.datetime.fromisoformat(nxt['ts_start'])-dt.datetime.fromisoformat(r['ts_end'])).total_seconds(),0) if nxt else 0
+        except (KeyError,TypeError,ValueError): pass
+    out.append(f'Limit bekleme: {_minutes(wait)}')
+    done=[s for s,_ in closed if s['stage']=='DONE']
+    ind=sum(independence(s)=='independent' for s in done)
+    if done: out.append(f'Doğrulama: bağımsız {ind} / tek model {len(done)-ind} (%{100*ind//len(done)} bağımsız)')
+    return '\n'.join(out)
+
 def role_prompt(root, role, ident=None):
     # Project-specific rules live in .ai/runner.json -> "role_prompt_extra" (optional string).
     rf=root/'.ai/runner.json'
@@ -682,6 +782,7 @@ def main():
     q=sub.add_parser('launch'); q.add_argument('role',choices=ROLES); q.add_argument('--task'); q.add_argument('--dry-run',action='store_true'); q.add_argument('--instruction')
     q=sub.add_parser('automate'); q.add_argument('id'); mode=q.add_mutually_exclusive_group(required=True); mode.add_argument('--enable',action='store_true'); mode.add_argument('--disable',action='store_true'); mode.add_argument('--resume',action='store_true')
     q=sub.add_parser('close'); q.add_argument('id'); q.add_argument('--reason',required=True); q.add_argument('--abandon',action='store_true')
+    q=sub.add_parser('report'); q.add_argument('--days',type=float); q.add_argument('--task')
     q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
     sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
     args=a.parse_args()
@@ -697,6 +798,7 @@ def main():
         c=read(p/'state.json').get('profile_choice')
         if c: print(f"Profil: {c['profile']} (auto) — {c['reason']}")
         print(p); return
+    if args.cmd=='report': print(report(root,args.days,args.task)); return
     if args.cmd=='commit': print(commit(root,args.id,args.apply,args.force)); return
     if args.cmd=='launch': print(launch(root,args.role,args.task,args.dry_run,args.instruction)); return
     if args.cmd=='message': print(json.dumps(message(root,args.id,args.sender,args.to,args.body),ensure_ascii=False)); return
@@ -712,7 +814,7 @@ def main():
             if (p/'state.json').is_file(): print(json.dumps(read(p/'state.json'),ensure_ascii=False,indent=2))
         return
     with locked(root):
-        p=task(root,args.id); s=read(p/'state.json')
+        p=task(root,args.id); s=read(p/'state.json'); prev=s['stage']
         if s['stage'] in ('CLOSED','ABANDONED') and args.cmd not in ('release','close'):
             raise ValueError(f'Görev kapalı ({s["stage"]}); devam için yeni görev aç.')
         if args.cmd=='close':
@@ -798,6 +900,12 @@ def main():
                          role=None,run_id=None,
                          message='Otomatik akis etkin',updated=now())
         s['updated']=now();s['revision']+=1;atomic(p/'state.json',s)
+        # Manual steps outside a runner role (no AI_TEAM_RUN_ID); Lead's NEW→first stage is the normal start.
+        if (args.cmd in ('automate','rework','close','advance','reclassify') and not os.environ.get('AI_TEAM_RUN_ID')
+                and not (args.cmd=='advance' and prev=='NEW')):
+            detail={'automate':lambda:'disable' if args.disable else 'resume' if args.resume else 'enable',
+                    'advance':lambda:f'{prev}→{args.stage}','reclassify':lambda:args.profile}.get(args.cmd,lambda:args.reason)()
+            metric(root,{'type':'intervention','task':p.name,'cmd':args.cmd,'detail':detail,'stage':prev})
         print(json.dumps(s,ensure_ascii=False,indent=2))
 
 if __name__=='__main__':

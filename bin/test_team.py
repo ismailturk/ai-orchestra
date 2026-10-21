@@ -666,6 +666,29 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(len(json.loads('['+self.cli('status','--all').stdout.replace('}\n{','},{')+']')),3)
         self.assertEqual(json.loads(self.cli('status','ST-1').stdout)['stage'],'ABANDONED')
 
+    def test_log_usage_report_and_interventions_cli(self):
+        self.assertIn('veri yok',self.cli('report').stdout)
+        log=self.root/'role.log'
+        log.write_text('Reading additional input from stdin...\n'
+            '{"type":"result","subtype":"success","duration_ms":4000,"total_cost_usd":0.5,"usage":{"input_tokens":4,"output_tokens":6,"cache_read_input_tokens":90,"cache_creation_input_tokens":10},"modelUsage":{"claude-x":{}}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":40,"output_tokens":5}}\nnot json\n')
+        u=team.log_usage(log)
+        self.assertEqual(u['tokens'],{'input':14,'output':11,'cache_read':130,'cache_creation':10})
+        self.assertEqual((u['cost_usd'],u['model'],u['duration_s']),(0.5,'claude-x',4.0))
+        log.write_text('plain text only');self.assertIsNone(team.log_usage(log)['tokens'])
+        self.cli('advance','DEMO-001','ANALYSIS')  # Lead's normal start: not an intervention
+        self.cli('automate','DEMO-001','--disable');self.cli('rework','DEMO-001','--reason','manual')
+        rows=team.load_metrics(self.root)
+        self.assertEqual([(r['type'],r['cmd'],r['detail']) for r in rows],[('intervention','automate','disable'),('intervention','rework','manual')])
+        base={'type':'run','task':'DEMO-001','role':'developer','model':'opus','engine':'claude','duration_s':120,
+              'tokens':{'input':1,'output':2,'cache_read':3,'cache_creation':4},'cost_usd':1.25}
+        team.metric(self.root,{**base,'result':'limit','ts_start':'2026-01-01T10:00:00+00:00','ts_end':'2026-01-01T10:01:00+00:00'})
+        team.metric(self.root,{**base,'result':'advanced','ts_start':'2026-01-01T10:31:00+00:00','ts_end':'2026-01-01T10:33:00+00:00'})
+        out=self.cli('report').stdout
+        self.assertIn('Müdahale: 2',out);self.assertIn('Limit bekleme: 30.0 dk',out);self.assertIn('Toplam maliyet: $2.50',out)
+        self.assertIn('developer  opus',out)
+        self.assertIn('veri yok',self.cli('report','--days','1','--task','NOPE').stdout)
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:

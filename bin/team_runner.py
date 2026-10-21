@@ -664,6 +664,7 @@ def run_task(root, ident, state, role, dry_run=False,
     if session_id:
         save_session(root, ident, role, provider, session_id, run_id)
     stamp(f'{ident}: {role} başladı · {stage}')
+    ts_start, started = team.now(), time.monotonic()
     before = team.git_changes(root) if role == 'developer' else None
     try:
         code, discovered_session, log_path = run_process(
@@ -681,6 +682,18 @@ def run_task(root, ident, state, role, dry_run=False,
     if discovered_session:
         save_session(root, ident, role, provider, discovered_session, run_id)
     _, after = load_state(root, ident)
+
+    def measured(result, kind):
+        usage = team.log_usage(log_path)
+        engine, model = engine_model(role, command)
+        team.metric(root, {'type': 'run', 'ts_start': ts_start, 'ts_end': team.now(),
+                           'duration_s': round(time.monotonic() - started, 1), 'task': ident, 'role': role,
+                           'stage': stage, 'profile': state.get('profile'), 'engine': engine,
+                           'model': model or usage['model'], 'result': kind, 'run_id': run_id,
+                           'rework_no': state.get('rework_count', 0), 'tokens': usage['tokens'],
+                           'cost_usd': usage['cost_usd']})
+        return result
+
     if after.get('escalated') and not state.get('escalated'):
         esc = after['escalated']
         stamp(f'{ident}: YÜKSELTİLDİ · fix → small (risk_paths: {", ".join(esc.get("files") or [])}); VERIFY_CODEX eklendi')
@@ -690,24 +703,24 @@ def run_task(root, ident, state, role, dry_run=False,
         set_waiting_limit(root, ident, role, run_id, retry_at)
         notify('AI Team limit bekliyor', f'{ident}: {role}, {retry_at.astimezone():%H:%M}')
         stamp(f'{ident}: BEKLİYOR · {role} limit/ağ hatası · {retry_at.astimezone():%H:%M} sonra yeniden denenecek')
-        return 'WAITING_LIMIT'
+        return measured('WAITING_LIMIT', 'limit')
     if code != 0:
         update_runner_state(root, ident, status='BLOCKED', role=role, run_id=run_id,
                             message=f'{role} çıkış kodu {code}; log: {log_path}')
         notify('AI Team rol hatası', f'{ident}: {role}, çıkış kodu {code}')
         stamp(f'{ident}: DURDU · {role} çıkış kodu {code} · {log_path}')
-        return 'BLOCKED'
+        return measured('BLOCKED', 'crash')
     if after.get('automation', {}).get('status') == 'BLOCKED':
         # team.py itself blocked the task (rework limit, independence rule); keep its message.
         notify('AI Team kontrol gerekli', f'{ident}: {after["automation"].get("message")}')
         stamp(f'{ident}: DURDU · {after["automation"].get("message")}')
-        return 'BLOCKED'
+        return measured('BLOCKED', 'blocked')
     if after['stage'] == stage:
         update_runner_state(root, ident, status='BLOCKED', role=role, run_id=run_id,
                             message=f'{role} aşamayı ilerletmedi; log: {log_path}')
         notify('AI Team kontrol gerekli', f'{ident}: {role} aşamayı ilerletmedi')
         stamp(f'{ident}: DURDU · {role} aşamayı ilerletmedi · {log_path}')
-        return 'BLOCKED'
+        return measured('BLOCKED', 'blocked')
     done = after['stage'] == 'DONE'
     label = f' · {team.pass_label(after)}' if done else ''
     update_runner_state(root, ident, status='COMPLETED' if done else 'IDLE',
@@ -716,7 +729,7 @@ def run_task(root, ident, state, role, dry_run=False,
     stamp(f'{ident}: {stage} → {after["stage"]}{label}')
     if done:
         notify('AI Team tamamlandı', f'{ident}{label}')
-    return 'ADVANCED'
+    return measured('ADVANCED', 'advanced')
 
 
 def dispatch_once(root, only=None, dry_run=False,
