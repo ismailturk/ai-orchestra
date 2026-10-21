@@ -108,6 +108,7 @@ class E2E(unittest.TestCase):
             os.environ.pop(k, None)
         p = patch.object(team_runner, 'CLAUDE_ROLES', {'lead', 'analyst', 'designer', 'developer', 'tester'})
         p.start(); self.addCleanup(p.stop)
+        team_runner._warned.clear()  # warn-once memory is per runner process
         self.log = io.StringIO()  # runner log (stamp output from all threads)
         out = contextlib.redirect_stdout(self.log); out.__enter__(); self.addCleanup(out.__exit__, None, None, None)
 
@@ -238,6 +239,46 @@ class E2E(unittest.TestCase):
         self.drive()
         for ident in ('APP-012', 'APP-013'):
             self.assertEqual(self.state(ident)['stage'], 'DONE', ident)
+
+    def budget(self, **cfg):
+        c = team.read(self.root / '.ai/runner.json'); c['budget'] = cfg
+        team.atomic(self.root / '.ai/runner.json', c)
+
+    def test_i_budget_warn_logs_thresholds_and_finishes(self):
+        self.budget(daily_usd=0.025, action='warn')  # each fake Claude run costs $0.01; Codex has no cost
+        self.task('APP-014')
+        self.drive()
+        self.assertEqual(self.state('APP-014')['stage'], 'DONE')
+        log = self.log.getvalue()
+        self.assertEqual(log.count('Bütçe UYARI: günlük'), 1)  # once per threshold, not per poll
+        self.assertEqual(log.count('Bütçe AŞILDI: günlük'), 1)
+        self.assertIn('Bütçe AŞILDI', team.budget_text(self.root))
+
+    def test_j_budget_pause_stops_new_roles_until_resume(self):
+        self.budget(daily_usd=0.02, action='pause')
+        self.task('APP-015')
+        self.drive()
+        s = self.state('APP-015')
+        self.assertEqual(s['stage'], 'VERIFY_CODEX')  # developer + tester spent $0.02; verifier not started
+        out = subprocess.run([sys.executable, str(BIN / 'team.py'), '--project', str(self.root), 'status'],
+                             capture_output=True, text=True).stdout
+        self.assertIn('Bütçe doldu — duraklatıldı', out.splitlines()[1])
+        subprocess.run([sys.executable, str(BIN / 'team.py'), '--project', str(self.root), 'budget', '--resume'],
+                       check=True, capture_output=True)
+        self.drive()
+        self.assertEqual(self.state('APP-015')['stage'], 'DONE')
+
+    def test_k_task_budget_parks_task_for_user(self):
+        self.budget(task_usd=0.015)
+        self.task('APP-016')
+        self.drive()
+        s = self.state('APP-016')
+        self.assertEqual((s['stage'], s['automation']['status']), ('VERIFY_CODEX', 'AWAITING_USER'))
+        self.assertIn('Görev bütçesi aşıldı', s['automation']['message'])
+        subprocess.run([sys.executable, str(BIN / 'team.py'), '--project', str(self.root), 'budget', '--resume',
+                        '--task', 'APP-016'], check=True, capture_output=True)
+        self.drive()
+        self.assertEqual(self.state('APP-016')['stage'], 'DONE')
 
 
 if __name__ == '__main__':

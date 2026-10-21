@@ -57,10 +57,11 @@ def stamp(message):
     print(time.strftime('[%H:%M:%S]'), message, flush=True)
 
 
-def warn_once(key, message):
-    """Log a recurring per-task problem once instead of on every poll."""
-    if _warned.get(key) != message:
-        _warned[key] = message
+def warn_once(key, message, token=None):
+    """Log a recurring problem once (per distinct token, default the message) instead of every poll."""
+    token = message if token is None else token
+    if _warned.get(key) != token:
+        _warned[key] = token
         stamp(message)
 
 
@@ -626,6 +627,14 @@ def triage(root, ident, state):
         return None
     if auto.get('status') in {'BLOCKED', 'PAUSED'} or waiting_limit(auto):
         return None
+    over = team.task_over_budget(root, ident, state)
+    if over:
+        if auto.get('status') != 'AWAITING_USER':
+            update_runner_state(root, ident, status='AWAITING_USER', role='lead', run_id=None,
+                                message=f'Görev bütçesi aşıldı (${over[0]:.2f} / ${over[1]:.2f}) — '
+                                        f'devam: team budget --resume --task {ident}')
+            notify('AI Team bütçe', f'{ident}: görev bütçesi aşıldı')
+        return None
     unresolved = [g for g in state.get('gates', []) if g.get('status') != 'RESOLVED_BY_LEAD']
     if unresolved:
         if auto.get('status') != 'AWAITING_USER':
@@ -737,6 +746,9 @@ def dispatch_once(root, only=None, dry_run=False,
                   idle_seconds=DEFAULT_IDLE_TIMEOUT_MINUTES * 60,
                   status_seconds=DEFAULT_STATUS_MINUTES * 60):
     """Run the first runnable task to completion (sequential; used by `once`)."""
+    if team.budget_state(root)['paused']:
+        stamp('Bütçe doldu — duraklatıldı (team budget --resume ya da runner.json)')
+        return 'PAUSED'
     for ident, state in enabled_tasks(root, only):
         role = triage(root, ident, state)
         if role:
@@ -796,6 +808,11 @@ def watch_loop(root, only, poll, timing, once_round=False):
         try:
             cfg = runner_config(root)
             tasks = enabled_tasks(root, only)
+            budget = team.budget_state(root)
+            for line in budget['lines']:  # once per threshold level, not per poll
+                warn_once('_budget' + line.split(':')[0] + line.split(' ')[2], line, line.split(' $')[0])
+            if budget['paused']:
+                tasks = []  # running roles finish; no new role starts
         except Exception as error:  # e.g. a broken runner.json; keep the loop alive and retry
             warn_once('_round', f'Runner turu atlandı: {error}')
             tasks = []
@@ -836,26 +853,31 @@ def runner_lock(root):
         yield
 
 
+def agent_env():
+    # PATH from the installing shell; the verifier engine switch is read at runner start, not from runner.json.
+    return {k: os.environ[k] for k in ('PATH', 'TEAM_VERIFIER_ENGINE') if os.environ.get(k)}
+
+
 def agent_unit(root, platform=None):
     """(path, content, load command, unload command) of a per-project user service running `watch`."""
     platform = platform or sys.platform
     pid = re.sub(r'[^A-Za-z0-9_.-]', '-', str(team.read(root/'.ai/project.json').get('id') or root.name))
     log = root/'.ai'/'runner-logs'/'_team_runner.log'
     args = [sys.executable, str(Path(__file__).resolve()), '--project', str(root), 'watch']
-    path_env = os.environ.get('PATH', '')
     if platform == 'darwin':
         label = f'com.ai-orchestra.runner.{pid}'
         path = Path.home()/'Library'/'LaunchAgents'/f'{label}.plist'
         body = plistlib.dumps({'Label': label, 'ProgramArguments': args, 'RunAtLoad': True,
                                'KeepAlive': True, 'WorkingDirectory': str(root),
                                'StandardOutPath': str(log), 'StandardErrorPath': str(log),
-                               'EnvironmentVariables': {'PATH': path_env}}).decode()
+                               'EnvironmentVariables': agent_env()}).decode()
         quoted = shlex.quote(str(path))
         return path, body, f'launchctl bootstrap gui/$(id -u) {quoted}', f'launchctl bootout gui/$(id -u) {quoted}'
     name = f'ai-orchestra-runner-{pid}.service'
     path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'systemd'/'user'/name
     body = (f'[Unit]\nDescription=ai-orchestra runner ({pid})\n\n[Service]\n'
-            f'ExecStart={shlex.join(args)}\nWorkingDirectory={root}\nEnvironment="PATH={path_env}"\n'
+            f'ExecStart={shlex.join(args)}\nWorkingDirectory={root}\n'
+            + ''.join(f'Environment="{k}={v}"\n' for k, v in agent_env().items()) +
             f'Restart=always\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n'
             '[Install]\nWantedBy=default.target\n')
     return path, body, f'systemctl --user daemon-reload && systemctl --user enable --now {name}', \

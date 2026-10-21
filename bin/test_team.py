@@ -689,6 +689,62 @@ class TeamTests(unittest.TestCase):
         self.assertIn('developer  opus',out)
         self.assertIn('veri yok',self.cli('report','--days','1','--task','NOPE').stdout)
 
+    def test_metrics_backfill_is_idempotent(self):
+        logs=self.root/'.ai/runner-logs/APP-1';logs.mkdir(parents=True)
+        (logs/'tester-11111111-1111-1111-1111-111111111111.log').write_text(
+            '{"type":"system","subtype":"init","session_id":"s"}\n'
+            '{"type":"result","subtype":"success","duration_ms":60000,"total_cost_usd":0.4,"usage":{"input_tokens":3,"output_tokens":7,"cache_read_input_tokens":50,"cache_creation_input_tokens":5},"modelUsage":{"claude-x":{}}}\n')
+        (logs/'verifier-22222222-2222-2222-2222-222222222222.log').write_text(
+            'Reading additional input from stdin...\n{"type":"thread.started","thread_id":"t"}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":0,"output_tokens":9,"reasoning_output_tokens":2}}\n')
+        (logs/'developer-33333333-3333-3333-3333-333333333333.log').write_text('crashed, no json')
+        (logs/'notes.log').write_text('ignored')
+        self.assertIn('3 satır',self.cli('metrics','backfill').stdout)
+        self.assertIn('0 satır',self.cli('metrics','backfill').stdout)
+        rows={r['role']:r for r in team.load_metrics(self.root)}
+        self.assertEqual((rows['tester']['engine'],rows['tester']['cost_usd'],rows['tester']['model']),('claude',0.4,'claude-x'))
+        self.assertEqual((rows['verifier']['engine'],rows['verifier']['tokens']['input'],rows['verifier']['tokens']['cache_read']),('codex',20,80))
+        self.assertIsNone(rows['verifier']['cost_usd']);self.assertIsNone(rows['developer']['tokens'])
+        self.assertTrue(all(r['task']=='APP-1' and r['backfill'] for r in rows.values()))
+
+    def test_dashboard_html_self_contained_with_and_without_data(self):
+        out=Path(self.tmp.name)/'d.html'
+        self.cli('dashboard','--out',str(out))
+        empty=out.read_text();self.assertIn('Veri yok',empty)
+        team.metric(self.root,{'type':'run','task':'DEMO-001','role':'tester','model':'m1','ts_start':team.now(),
+                               'duration_s':5,'tokens':{'input':1,'output':2,'cache_read':3,'cache_creation':4},'cost_usd':0.5})
+        (self.root/'.ai/runner.json').write_text(json.dumps({'budget':{'daily_usd':0.5}}))
+        self.cli('dashboard','--out',str(out))
+        html=out.read_text()
+        for page in (empty,html):
+            self.assertNotRegex(page,r'(?i)https?:|//cdn|@import|<link|src=')  # no external resource at all
+        data=json.loads(html.split('id="data">')[1].split('</script>')[0])
+        p=data['projects'][0]
+        self.assertEqual((p['name'],p['runs'][0]['tok'],p['spend']['today']),('fixture',[1,2,3,4],0.5))
+        self.assertIn('Bütçe AŞILDI',p['warnings'][0])
+        self.assertIn('prefers-color-scheme',html);self.assertIn('viewport',html)
+        two=Path(self.tmp.name)/'two';(two/'.ai').mkdir(parents=True);(two/'.ai/PROJECT.md').write_text('x')
+        (two/'.ai/project.json').write_text(json.dumps({'id':'second'}))
+        self.cli('dashboard','--project',str(self.root),'--project',str(two),'--out',str(out))
+        self.assertEqual([p['name'] for p in json.loads(out.read_text().split('id="data">')[1].split('</script>')[0])['projects']],['fixture','second'])
+
+    def test_dashboard_serve_regenerates_per_request(self):
+        import threading,urllib.request,http.server
+        srv=[]
+        orig=http.server.HTTPServer
+        def capture(*a,**k):
+            s=orig(('127.0.0.1',0),a[1]);srv.append(s);return s
+        with patch.object(http.server,'HTTPServer',side_effect=capture),patch('builtins.print'):
+            th=threading.Thread(target=team.dashboard,args=([self.root],),kwargs={'serve':1},daemon=True);th.start()
+            for _ in range(100):
+                if srv: break
+                __import__('time').sleep(0.02)
+            url='http://127.0.0.1:%d/'%srv[0].server_port
+            self.assertIn('Veri yok',urllib.request.urlopen(url).read().decode())
+            team.metric(self.root,{'type':'run','task':'DEMO-001','role':'lead','model':'live-model','ts_start':team.now(),'tokens':None,'cost_usd':None})
+            self.assertIn('live-model',urllib.request.urlopen(url).read().decode())
+            srv[0].shutdown()
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -726,6 +782,14 @@ class PortabilityTests(unittest.TestCase):
             f.write_text('edited'); out=run()
             self.assertIn('SKILL.md.bak',out.stdout); self.assertEqual((f.parent/'SKILL.md.bak').read_text(),'edited')
             self.assertIn('name: orchestra-setup',f.read_text())
+
+    def test_init_suggests_gitignore_without_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            out=team.init_project(d)
+            self.assertIn('ÖNERİ .gitignore: .ai/runner-logs/ .ai/metrics.jsonl .ai/dashboard.html',out)
+            self.assertFalse((Path(d)/'.gitignore').exists())
+            (Path(d)/'.gitignore').write_text('\n'.join(team.GITIGNORE_SUGGEST))
+            self.assertNotIn('ÖNERİ',team.init_project(d))
 
     def test_doctor_reports_project_files(self):
         with tempfile.TemporaryDirectory() as d:

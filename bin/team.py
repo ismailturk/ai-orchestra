@@ -83,8 +83,14 @@ def init_project(root,dry_run=False):
             if not dry_run: (root/d).mkdir(parents=True,exist_ok=True)
     out=['init '+str(root)+(' (dry-run, yazilmadi)' if dry_run else '')]
     out+=['  olusturuldu: '+m for m in made]+['  atlandi (var): '+m for m in skipped]+['  UYARI: '+n for n in notes]
+    gi=root/'.gitignore'; have=gi.read_text(errors='ignore').split() if gi.is_file() else []
+    missing=[x for x in GITIGNORE_SUGGEST if x not in have]
+    if missing: out.append('  ÖNERİ .gitignore: '+' '.join(missing))
     if not made: out.append('nothing to create')
     return '\n'.join(out)
+
+# Runtime output that should not be committed; `team init` suggests (never writes) these.
+GITIGNORE_SUGGEST=['.ai/runner-logs/','.ai/metrics.jsonl','.ai/dashboard.html','.ai/budget.json','.ai/.team.lock','.ai/.runner.lock']
 
 def doctor(root=None):
     """Short environment report; returns (lines, ok)."""
@@ -626,6 +632,122 @@ def log_usage(path):
             tok['cache_read']+=cached; tok['cache_creation']+=u.get('cache_write_input_tokens') or 0
     return out
 
+LOG_NAME=re.compile(r'^(lead|analyst|designer|developer|tester|verifier)-([0-9a-f-]{36})\.log$')
+
+def backfill(root):
+    """Add metrics rows for existing role logs (.ai/runner-logs/<ID>/<role>-<run_id>.log); idempotent by run_id."""
+    known={r.get('run_id') for r in load_metrics(root)}
+    added=0
+    for f in sorted((root/'.ai'/'runner-logs').glob('*/*.log')):
+        m=LOG_NAME.match(f.name)
+        if not m or m.group(2) in known: continue
+        u=log_usage(f); st=f.stat()
+        end=dt.datetime.fromtimestamp(st.st_mtime,dt.timezone.utc)
+        born=getattr(st,'st_birthtime',0)
+        start=dt.datetime.fromtimestamp(born,dt.timezone.utc) if born else None
+        if not start or start>end: start=end-dt.timedelta(seconds=u['duration_s'] or 0)
+        with f.open('rb') as h: head=h.read(4096)
+        metric(root,{'type':'run','backfill':True,'ts':start.isoformat(),'ts_start':start.isoformat(),'ts_end':end.isoformat(),
+                     'duration_s':round((end-start).total_seconds(),1),'task':f.parent.name,'role':m.group(1),
+                     'run_id':m.group(2),'engine':'codex' if b'thread.started' in head else 'claude',
+                     'model':u['model'],'result':None,'rework_no':None,'tokens':u['tokens'],'cost_usd':u['cost_usd']})
+        known.add(m.group(2)); added+=1
+    return f'backfill: {added} satır eklendi ({root/".ai"/"metrics.jsonl"})'
+
+BUDGET_DEFAULT={'daily_usd':None,'weekly_usd':None,'task_usd':None,'action':'warn'}
+
+def spend(rows):
+    """Cost per local today / this week (Mon) / this month and per task, from run rows (Codex has no cost)."""
+    today=utcnow().astimezone().date(); monday=today-dt.timedelta(days=today.weekday())
+    out={'today':0.0,'week':0.0,'month':0.0,'tasks':{}}
+    for r in rows:
+        if r.get('type')!='run' or not r.get('cost_usd'): continue
+        try: d=dt.datetime.fromisoformat(r.get('ts_start') or r['ts']).astimezone().date()
+        except (KeyError,TypeError,ValueError): continue
+        c=r['cost_usd']
+        out['today']+=c*(d==today); out['week']+=c*(d>=monday); out['month']+=c*(d.replace(day=1)==today.replace(day=1))
+        out['tasks'][r.get('task')]=out['tasks'].get(r.get('task'),0)+c
+    return out
+
+def budget_state(root):
+    cfg={**BUDGET_DEFAULT,**(runner_json(root).get('budget') or {})}
+    sp=spend(load_metrics(root)); lines=[]; full=False
+    for key,label,val in (('daily_usd','günlük',sp['today']),('weekly_usd','haftalık',sp['week'])):
+        lim=cfg.get(key)
+        if not lim: continue
+        pct=val/lim*100
+        if pct>=100: full=True; lines.append(f'Bütçe AŞILDI: {label} ${val:.2f} / ${lim:.2f} (%{pct:.0f})')
+        elif pct>=80: lines.append(f'Bütçe UYARI: {label} ${val:.2f} / ${lim:.2f} (%{pct:.0f}, %80 eşiği)')
+    try: resumed=read(root/'.ai'/'budget.json').get('resumed_on')==str(utcnow().astimezone().date())
+    except (OSError,ValueError): resumed=False
+    paused=full and cfg.get('action')=='pause' and not resumed
+    if paused: lines.append('Bütçe doldu — duraklatıldı (team budget --resume ya da runner.json)')
+    return {'cfg':cfg,'spend':sp,'lines':lines,'paused':paused}
+
+def task_over_budget(root, ident, s):
+    """(spent, limit) when this task reached budget.task_usd, else None."""
+    lim=({**BUDGET_DEFAULT,**(runner_json(root).get('budget') or {})}).get('task_usd')
+    if not lim or s.get('budget_override'): return None
+    # ponytail: rereads metrics.jsonl per task per round; cache by mtime if the file grows huge.
+    spent=spend(load_metrics(root))['tasks'].get(ident,0)
+    return (spent,lim) if spent>=lim else None
+
+def budget_text(root):
+    b=budget_state(root); c=b['cfg']; sp=b['spend']
+    lim=lambda v,k: f'${v:.2f} / ${c[k]:.2f} (%{v/c[k]*100:.0f})' if c.get(k) else f'${v:.2f} (limit kapalı)'
+    top=max(sp['tasks'].items(),key=lambda kv:kv[1],default=None)
+    out=[f'Bütçe (action={c.get("action")})','  bugün: '+lim(sp['today'],'daily_usd'),'  bu hafta: '+lim(sp['week'],'weekly_usd'),
+         f'  bu ay: ${sp["month"]:.2f}',f'  görev limiti: '+(f'${c["task_usd"]:.2f}' if c.get('task_usd') else 'kapalı')
+         +(f' · en yüksek {top[0]} ${top[1]:.2f}' if top else '')]
+    return '\n'.join(out+['  '+l for l in b['lines']]+['  Not: maliyet yalnız Claude satırlarından (Codex log\'u maliyet vermez).'])
+
+def dashboard_data(roots):
+    projects=[]
+    for root in roots:
+        try: name=str(read(root/'.ai/project.json').get('id') or root.name)
+        except (OSError,ValueError): name=root.name
+        rows=load_metrics(root); tasks={}
+        for f in sorted((root/'tasks').glob('*/state.json')):
+            try: s=read(f)
+            except (OSError,ValueError): continue
+            tasks[f.parent.name]={'profile':s.get('profile'),'stage':s.get('stage'),'rework':s.get('rework_count',0),
+                                  'independence':independence(s) if s.get('stage')=='DONE' else None}
+        runs=[{'t':r.get('ts_start') or r.get('ts'),'task':r.get('task'),'role':r.get('role'),'model':r.get('model') or '-',
+               'dur':r.get('duration_s') or 0,'result':r.get('result'),'usd':r.get('cost_usd'),
+               'tok':[(r.get('tokens') or {}).get(k) or 0 for k in ('input','output','cache_read','cache_creation')]}
+              for r in rows if r.get('type')=='run']
+        b=budget_state(root)
+        projects.append({'name':name,'runs':runs,'tasks':tasks,'budget':b['cfg'],'spend':{k:b['spend'][k] for k in ('today','week','month')},
+                         'warnings':b['lines'],'interventions':sum(r.get('type')=='intervention' for r in rows)})
+    return {'generated':now(),'projects':projects}
+
+def dashboard_html(roots):
+    data=json.dumps(dashboard_data(roots),ensure_ascii=False).replace('</','<\\/')
+    return (Path(__file__).resolve().parent.parent/'templates'/'dashboard.html').read_text().replace('__DATA__',data)
+
+def dashboard(roots, out=None, open_=False, serve=None):
+    if serve:
+        import http.server
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # every request re-reads metrics: live view
+                body=dashboard_html(roots).encode()
+                self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8')
+                self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            def log_message(self,*a): pass
+        srv=http.server.HTTPServer(('127.0.0.1',serve),Handler)
+        url=f'http://127.0.0.1:{srv.server_port}/'
+        print('Dashboard: '+url+' (Ctrl-C ile durdur)',flush=True)
+        if open_:
+            import webbrowser; webbrowser.open(url)
+        try: srv.serve_forever()
+        except KeyboardInterrupt: pass
+        return ''
+    out=Path(out) if out else roots[0]/'.ai'/'dashboard.html'
+    out.parent.mkdir(parents=True,exist_ok=True); out.write_text(dashboard_html(roots))
+    if open_:
+        import webbrowser; webbrowser.open(out.resolve().as_uri())
+    return f'Dashboard yazıldı: {out}'
+
 def _minutes(seconds):
     return f'{seconds/60:.1f} dk'
 
@@ -664,9 +786,9 @@ def report(root, days=None, ident=None):
         for i,key in enumerate(('input','output','cache_read','cache_creation'),1): a[i]+=(r.get('tokens') or {}).get(key) or 0
         if r.get('cost_usd') is not None: a[5]=(a[5] or 0)+r['cost_usd']
     if table:
-        out.append(f'{"rol":<10} {"model":<18} {"çalışma":>7} {"input":>10} {"output":>10} {"cache_read":>12} {"cache_write":>11} {"$":>8}')
+        out.append(f'{"rol":<10} {"model":<22} {"çalışma":>7} {"input":>10} {"output":>10} {"cache_read":>12} {"cache_write":>11} {"$":>8}')
         for (role,model),a in sorted(table.items()):
-            out.append(f'{role:<10} {model[:18]:<18} {a[0]:>7} {a[1]:>10} {a[2]:>10} {a[3]:>12} {a[4]:>11} '+(f'{a[5]:>8.2f}' if a[5] is not None else f'{"-":>8}'))
+            out.append(f'{role:<10} {model[:22]:<22} {a[0]:>7} {a[1]:>10} {a[2]:>10} {a[3]:>12} {a[4]:>11} '+(f'{a[5]:>8.2f}' if a[5] is not None else f'{"-":>8}'))
         cost=sum(a[5] or 0 for a in table.values()); out.append(f'Toplam maliyet: ${cost:.2f} (Codex satırlarında maliyet yok)')
     if closed: out.append(f'Rework ortalaması: {statistics.mean(s.get("rework_count",0) for s,_ in closed):.2f}')
     out.append(f'Müdahale: {sum(r.get("type")=="intervention" for r in rows)}')
@@ -782,6 +904,10 @@ def main():
     q=sub.add_parser('launch'); q.add_argument('role',choices=ROLES); q.add_argument('--task'); q.add_argument('--dry-run',action='store_true'); q.add_argument('--instruction')
     q=sub.add_parser('automate'); q.add_argument('id'); mode=q.add_mutually_exclusive_group(required=True); mode.add_argument('--enable',action='store_true'); mode.add_argument('--disable',action='store_true'); mode.add_argument('--resume',action='store_true')
     q=sub.add_parser('close'); q.add_argument('id'); q.add_argument('--reason',required=True); q.add_argument('--abandon',action='store_true')
+    q=sub.add_parser('metrics'); q.add_argument('action',choices=['backfill'])
+    q=sub.add_parser('budget'); q.add_argument('--resume',action='store_true'); q.add_argument('--task')
+    q=sub.add_parser('dashboard'); q.add_argument('--project',dest='dash_projects',action='append',default=None)
+    q.add_argument('--all',action='store_true'); q.add_argument('--out'); q.add_argument('--open',action='store_true'); q.add_argument('--serve',type=int)
     q=sub.add_parser('report'); q.add_argument('--days',type=float); q.add_argument('--task')
     q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
     sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
@@ -792,7 +918,28 @@ def main():
         pr=Path(args.project).expanduser().resolve()
         lines,good=doctor(pr if (pr/'.ai/PROJECT.md').is_file() else None)
         print('\n'.join(lines)); sys.exit(0 if good else 1)
+    if args.cmd=='dashboard':
+        if args.dash_projects: roots=[project(x) for x in args.dash_projects]
+        elif args.all:
+            roots=[Path(v.get('root') if isinstance(v,dict) else v).expanduser() for v in load_projects().values()]
+            roots=[r for r in roots if (r/'.ai/PROJECT.md').is_file()]
+            if not roots: raise ValueError('projects.json içinde onboard edilmiş proje yok.')
+        else: roots=[project(args.project)]
+        print(dashboard(roots,args.out,args.open,args.serve)); return
     root=project(args.project)
+    if args.cmd=='metrics': print(backfill(root)); return
+    if args.cmd=='budget':
+        if args.resume and args.task:
+            with locked(root):
+                p=task(root,args.task); s=read(p/'state.json')
+                s['budget_override']=True
+                s.setdefault('automation',{}).update(status='IDLE',role=None,message='Görev bütçesi kullanıcı tarafından aşıldı',updated=now())
+                s['updated']=now(); s['revision']=s.get('revision',0)+1; atomic(p/'state.json',s)
+            metric(root,{'type':'intervention','task':args.task,'cmd':'budget','detail':'resume-task'})
+        elif args.resume:
+            atomic(root/'.ai'/'budget.json',{'resumed_on':str(utcnow().astimezone().date())})
+            metric(root,{'type':'intervention','task':None,'cmd':'budget','detail':'resume'})
+        print(budget_text(root)); return
     if args.cmd=='new':
         p=create(root,args.id,args.title,args.profile,args.auto,args.files)
         c=read(p/'state.json').get('profile_choice')
@@ -808,7 +955,7 @@ def main():
             if not args.task or m['task']==args.task: print(json.dumps(m,ensure_ascii=False))
         return
     if args.cmd=='status' and not args.id and not args.all:
-        print(status_summary(root)); return
+        print('\n'.join(budget_state(root)['lines']+[status_summary(root)])); return
     if args.cmd=='status':
         for p in ([task(root,args.id)] if args.id else sorted((root/'tasks').glob('*'))):
             if (p/'state.json').is_file(): print(json.dumps(read(p/'state.json'),ensure_ascii=False,indent=2))

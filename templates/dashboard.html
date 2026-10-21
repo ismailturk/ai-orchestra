@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Panosu</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--fg:#1d1d1f;--mut:#6b6b70;--line:#e3e3e0;--warn:#b26b00;--bad:#c0392b;--ok:#2e7d4f;
+--c0:#3b6fd8;--c1:#e07b39;--c2:#2e9d7a;--c3:#a35dd1;--c4:#d14b6f;--c5:#8a8f2a;--c6:#3aa0b8;--c7:#7a6a58}
+@media (prefers-color-scheme:dark){:root{--bg:#141416;--card:#1e1e22;--fg:#ececf0;--mut:#9a9aa3;--line:#323238;--warn:#e0a040;--bad:#ff6b5b;--ok:#5cc98a;
+--c0:#6f9bff;--c1:#ff9b5c;--c2:#4fd1a8;--c3:#c48bf0;--c4:#ff7c9c;--c5:#c4c95a;--c6:#62c8de;--c7:#b9a58e}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:16px}h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px}
+.mut{color:var(--mut);font-size:12px}.bar{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+select{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+.big{font-size:22px;font-weight:600}.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px}
+.kv span:nth-child(odd){color:var(--mut)}section{margin-top:12px}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:500}tr.task{cursor:pointer}tr.task:hover td{background:var(--bg)}tr.detail td{background:var(--bg);font-size:12px}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-top:6px}.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px}
+.meter{height:10px;background:var(--line);border-radius:5px;overflow:hidden;margin:4px 0 8px}.meter i{display:block;height:100%}
+.warn{color:var(--warn)}.bad{color:var(--bad)}svg text{fill:var(--mut);font-size:10px}
+</style>
+</head>
+<body>
+<main>
+<h1>Token ve maliyet panosu</h1>
+<div class="mut" id="gen"></div>
+<div class="bar">
+<select id="fp" aria-label="Proje"></select>
+<select id="fr" aria-label="Tarih aralığı"><option value="7">Son 7 gün</option><option value="30" selected>Son 30 gün</option><option value="90">Son 90 gün</option><option value="0">Tümü</option></select>
+<select id="fo" aria-label="Rol"></select>
+<select id="fb" aria-label="Kırılım"><option value="role">Kırılım: rol</option><option value="model">Kırılım: model</option></select>
+</div>
+<div id="warns"></div>
+<div class="grid" id="cards"></div>
+<section class="card"><h2>Günlük token ve maliyet</h2><div class="scroll" id="chart"></div><div class="legend" id="legend"></div></section>
+<section class="card"><h2>En pahalı 10 görev</h2><div class="mut">Satıra tıkla: rol bazında çalışmalar.</div><div class="scroll" id="top"></div></section>
+<section class="card"><h2>Rol × model</h2><div class="mut">Cache oranı = cache read / (input + cache read + cache write); yüksek oran token tasarrufu demektir.</div><div class="scroll" id="rm"></div></section>
+<section class="card"><h2>Bütçe</h2><div id="budget"></div></section>
+</main>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(()=>{ // own scope: globals such as window.top must not clash
+const D=JSON.parse(document.getElementById('data').textContent);
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(Math.round(n));
+const usd=n=>n==null?'-':'$'+n.toFixed(2);
+const dk=s=>(s/60).toFixed(1)+' dk';
+const day=t=>{const d=new Date(t);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
+const sum=a=>a.reduce((x,y)=>x+y,0);
+const COLORS=[0,1,2,3,4,5,6,7].map(i=>'var(--c'+i+')');
+$('gen').textContent='Üretildi: '+new Date(D.generated).toLocaleString()+' · '+D.projects.length+' proje';
+const all=[];D.projects.forEach(p=>p.runs.forEach(r=>all.push(Object.assign({p:p.name},r))));
+const opt=(el,vals,first)=>{el.innerHTML='<option value="">'+first+'</option>'+vals.map(v=>'<option>'+esc(v)+'</option>').join('')};
+opt($('fp'),D.projects.map(p=>p.name),'Tüm projeler');
+opt($('fo'),[...new Set(all.map(r=>r.role))].sort(),'Tüm roller');
+function base(){const p=$('fp').value,o=$('fo').value;return all.filter(r=>(!p||r.p===p)&&(!o||r.role===o))}
+function inRange(rows){const n=+$('fr').value;if(!n)return rows;const since=Date.now()-n*864e5;return rows.filter(r=>new Date(r.t)>=since)}
+function totals(rows){return{tok:[0,1,2,3].map(i=>sum(rows.map(r=>r.tok[i]))),usd:sum(rows.map(r=>r.usd||0))}}
+function limitWait(rows){const s=[...rows].sort((a,b)=>a.t<b.t?-1:1);let w=0;
+ s.forEach((r,i)=>{if(r.result!=='limit')return;const n=s.slice(i+1).find(x=>x.p===r.p&&x.task===r.task&&x.role===r.role);
+ if(n)w+=Math.max(0,(new Date(n.t)-new Date(r.t))/1e3-(r.dur||0))});return w}
+function cards(rows){
+ const now=new Date(),today=day(now),mon=new Date(now);mon.setHours(0,0,0,0);mon.setDate(mon.getDate()-((mon.getDay()+6)%7));
+ const m0=new Date(now.getFullYear(),now.getMonth(),1);
+ const box=(label,rs)=>{const t=totals(rs);return '<div class="card"><div class="mut">'+label+'</div><div class="big">'+usd(t.usd)+'</div><div class="kv">'
+  +['input','output','cache read','cache write'].map((k,i)=>'<span>'+k+'</span><span>'+fmt(t.tok[i])+'</span>').join('')+'</div></div>'};
+ const ranged=inRange(rows),tasks=new Set(ranged.map(r=>r.p+'/'+r.task)).size;
+ $('cards').innerHTML=box('Bugün',rows.filter(r=>day(r.t)===today))+box('Bu hafta',rows.filter(r=>new Date(r.t)>=mon))+box('Bu ay',rows.filter(r=>new Date(r.t)>=m0))
+  +'<div class="card"><div class="mut">Seçili aralık</div><div class="big">'+usd(totals(ranged).usd)+'</div><div class="kv"><span>görev başı</span><span>'
+  +(tasks?usd(totals(ranged).usd/tasks):'-')+'</span><span>görev</span><span>'+tasks+'</span><span>çalışma</span><span>'+ranged.length
+  +'</span><span>limit bekleme</span><span>'+dk(limitWait(ranged))+'</span></div></div>';
+}
+function chart(rows){
+ const by=$('fb').value,days={},keys=new Set();
+ rows.forEach(r=>{const d=day(r.t),k=r[by]||'-';keys.add(k);days[d]=days[d]||{tok:{},usd:0};days[d].tok[k]=(days[d].tok[k]||0)+sum(r.tok);days[d].usd+=r.usd||0});
+ const ds=Object.keys(days).sort(),ks=[...keys].sort();
+ if(!ds.length){$('chart').innerHTML='<p class="mut">Veri yok. Runner çalıştıkça .ai/metrics.jsonl dolar; geçmiş için: team metrics backfill</p>';$('legend').innerHTML='';return}
+ const max=Math.max(...ds.map(d=>sum(Object.values(days[d].tok))),1),bw=Math.max(8,Math.min(28,Math.floor(900/ds.length)-2)),H=180,W=ds.length*(bw+2)+40;
+ let s='<svg width="'+W+'" height="'+(H+30)+'" role="img" aria-label="Günlük token"><text x="0" y="10">'+fmt(max)+'</text>';
+ ds.forEach((d,i)=>{let y=H;const x=40+i*(bw+2);ks.forEach((k,j)=>{const v=days[d].tok[k]||0,h=v/max*(H-15);if(!h)return;y-=h;
+  s+='<rect x="'+x+'" y="'+y.toFixed(1)+'" width="'+bw+'" height="'+h.toFixed(1)+'" fill="'+COLORS[j%8]+'"><title>'+esc(d+' · '+k+': '+fmt(v)+' token')+'</title></rect>'});
+  s+='<rect x="'+x+'" y="'+(y-3)+'" width="'+bw+'" height="2" fill="var(--fg)" opacity=".5"><title>'+esc(d+' · '+usd(days[d].usd))+'</title></rect>';
+  if(i%Math.ceil(ds.length/8)===0)s+='<text x="'+x+'" y="'+(H+14)+'">'+d.slice(5)+'</text>'});
+ $('chart').innerHTML=s+'</svg>';
+ $('legend').innerHTML=ks.map((k,j)=>'<span><i class="sw" style="background:'+COLORS[j%8]+'"></i>'+esc(k)+'</span>').join('')+'<span class="mut">çizgi üstü: günlük $ (üzerine gel)</span>';
+}
+function topTasks(rows){
+ const g={};rows.forEach(r=>{const k=r.p+'\u0000'+r.task;(g[k]=g[k]||[]).push(r)});
+ const list=Object.entries(g).map(([k,rs])=>{const[p,task]=k.split('\u0000'),t=(D.projects.find(x=>x.name===p).tasks[task])||{};
+  return{p,task,rs,t,tok:sum(rs.map(r=>sum(r.tok))),usd:sum(rs.map(r=>r.usd||0)),dur:sum(rs.map(r=>r.dur||0))}})
+  .sort((a,b)=>b.usd-a.usd||b.tok-a.tok).slice(0,10);
+ if(!list.length){$('top').innerHTML='<p class="mut">Veri yok.</p>';return}
+ const multi=D.projects.length>1;
+ $('top').innerHTML='<table><tr><th>görev</th><th>profil</th><th>token</th><th>$</th><th>süre</th><th>rework</th><th>doğrulama</th></tr>'+list.map((x,i)=>
+  '<tr class="task" data-i="'+i+'"><td>'+esc((multi?x.p+' / ':'')+x.task)+'</td><td>'+esc(x.t.profile||'-')+'</td><td>'+fmt(x.tok)+'</td><td>'+usd(x.usd)+'</td><td>'+dk(x.dur)+'</td><td>'
+  +(x.t.rework||0)+'</td><td>'+(x.t.independence==='independent'?'bağımsız':x.t.independence?'tek model':'-')+'</td></tr><tr class="detail" id="d'+i+'" hidden><td colspan="7"><table><tr><th>rol</th><th>model</th><th>başlangıç</th><th>süre</th><th>token</th><th>$</th><th>sonuç</th></tr>'
+  +x.rs.map(r=>'<tr><td>'+esc(r.role)+'</td><td>'+esc(r.model)+'</td><td>'+esc(new Date(r.t).toLocaleString())+'</td><td>'+dk(r.dur)+'</td><td>'+fmt(sum(r.tok))+'</td><td>'+usd(r.usd)+'</td><td>'+esc(r.result||'-')+'</td></tr>').join('')
+  +'</table></td></tr>').join('')+'</table>';
+ document.querySelectorAll('tr.task').forEach(tr=>tr.onclick=()=>{const d=$('d'+tr.dataset.i);d.hidden=!d.hidden});
+}
+function roleModel(rows){
+ const g={};rows.forEach(r=>{const k=r.role+'\u0000'+r.model;(g[k]=g[k]||[]).push(r)});
+ const ks=Object.keys(g).sort();if(!ks.length){$('rm').innerHTML='<p class="mut">Veri yok.</p>';return}
+ $('rm').innerHTML='<table><tr><th>rol</th><th>model</th><th>çalışma</th><th>input</th><th>output</th><th>cache read</th><th>cache write</th><th>cache oranı</th><th>$</th></tr>'+ks.map(k=>{
+  const[role,model]=k.split('\u0000'),t=totals(g[k]),all=t.tok[0]+t.tok[2]+t.tok[3];
+  return '<tr><td>'+esc(role)+'</td><td>'+esc(model)+'</td><td>'+g[k].length+'</td>'+t.tok.map(v=>'<td>'+fmt(v)+'</td>').join('')
+   +'<td>'+(all?Math.round(100*t.tok[2]/all)+'%':'-')+'</td><td>'+usd(t.usd)+'</td></tr>'}).join('')+'</table>';
+}
+function budget(){
+ const p=$('fp').value,ps=D.projects.filter(x=>!p||x.name===p);let h='',w='';
+ ps.forEach(x=>{const b=x.budget||{},rows=[['günlük',x.spend.today,b.daily_usd],['haftalık',x.spend.week,b.weekly_usd]];
+  h+='<div class="mut">'+esc(x.name)+' · action='+esc(b.action||'warn')+(b.task_usd?' · görev limiti '+usd(b.task_usd):'')+'</div>';
+  rows.forEach(([l,v,lim])=>{if(!lim){h+='<div class="mut">'+l+': '+usd(v)+' (limit kapalı)</div>';return}
+   const pct=v/lim*100,c=pct>=100?'var(--bad)':pct>=80?'var(--warn)':'var(--ok)';
+   h+='<div>'+l+': '+usd(v)+' / '+usd(lim)+' (%'+pct.toFixed(0)+')</div><div class="meter"><i style="width:'+Math.min(pct,100)+'%;background:'+c+'"></i></div>'});
+  x.warnings.forEach(m=>w+='<div class="card '+(/AŞILDI|doldu/.test(m)?'bad':'warn')+'">'+esc(x.name+': '+m)+'</div>')});
+ $('budget').innerHTML=h||'<p class="mut">Bütçe tanımlı değil (.ai/runner.json "budget").</p>';$('warns').innerHTML=w?'<div class="grid">'+w+'</div>':'';
+}
+function render(){const rows=base(),r=inRange(rows);cards(rows);chart(r);topTasks(r);roleModel(r);budget()}
+['fp','fr','fo','fb'].forEach(id=>$(id).onchange=render);render();
+})();
+</script>
+</body>
+</html>
