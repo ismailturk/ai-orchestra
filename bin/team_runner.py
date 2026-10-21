@@ -622,6 +622,8 @@ def triage(root, ident, state):
                                 run_id=None, message='Görev tamamlandı · ' + team.pass_label(state))
             notify('AI Team tamamlandı', f'{ident} · {team.pass_label(state)}')
         return None
+    if stage in team.CLOSED_STAGES:  # CLOSED/ABANDONED: closed without the full flow, never run
+        return None
     if auto.get('status') in {'BLOCKED', 'PAUSED'} or waiting_limit(auto):
         return None
     unresolved = [g for g in state.get('gates', []) if g.get('status') != 'RESOLVED_BY_LEAD']

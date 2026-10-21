@@ -645,6 +645,27 @@ class TeamTests(unittest.TestCase):
         old={'claude_test':{'engine':'Claude Code'},'codex_verify':{'engine':'Codex'}}  # pre-engine_id records
         self.assertEqual(team.pass_label(old),'PASS/PASS (bağımsız)')
 
+    def test_close_abandon_and_grouped_status_cli(self):
+        self.assertIn('Seni bekliyor',self.cli('status').stdout)  # DEMO-001 NEW
+        a=team.create(self.root,'ST-1','abandon me','small',True);self.cli('advance','ST-1','IMPLEMENTATION')
+        out=self.cli('status').stdout;self.assertIn('Sırada (auto)',out);self.assertIn('ST-1 IMPLEMENTATION',out)
+        s=team.read(a/'state.json');s['automation'].update(status='WAITING_LIMIT',retry_at='2030-01-01T10:00:00+00:00');team.atomic(a/'state.json',s)
+        self.assertIn('Limit bekliyor (1)\n  ST-1 IMPLEMENTATION — retry_at 2030-01-01T10:00',self.cli('status').stdout)
+        s['automation']['status']='RUNNING';s['automation']['role']='developer';team.atomic(a/'state.json',s)
+        self.assertIn('Çalışıyor (1)',self.cli('status').stdout)
+        self.cli('close','ST-1','--abandon','--reason','not needed')
+        s=team.read(a/'state.json')
+        self.assertEqual((s['stage'],s['closed']['from_stage'],s['closed']['reason'],s['automation']['enabled']),('ABANDONED','IMPLEMENTATION','not needed',False))
+        self.cli('close','ST-1','--reason','again',ok=False);self.cli('rework','ST-1','--reason','x',ok=False)
+        self.cli('automate','ST-1','--enable',ok=False)
+        self.cli('close','DEMO-001','--reason','merged elsewhere')
+        self.assertEqual(team.read(self.p/'state.json')['stage'],'CLOSED')
+        self.assertEqual(self.cli('status').stdout.strip(),'Açık görev yok.')
+        d=team.create(self.root,'ST-2','done');s=team.read(d/'state.json');s.update(stage='DONE',changed_files=['a.txt']);team.atomic(d/'state.json',s)
+        self.assertIn('Commit bekliyor (1)\n  ST-2 DONE — 1 dosya',self.cli('status').stdout)
+        self.assertEqual(len(json.loads('['+self.cli('status','--all').stdout.replace('}\n{','},{')+']')),3)
+        self.assertEqual(json.loads(self.cli('status','ST-1').stdout)['stage'],'ABANDONED')
+
 class PortabilityTests(unittest.TestCase):
     def test_init_creates_defaults_and_keeps_existing(self):
         with tempfile.TemporaryDirectory() as d:

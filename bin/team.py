@@ -554,6 +554,34 @@ def advance(root,p,s,stage):
         s['done_at']=now()
         if s.get('profile')=='fix': append_changelog(root,s)
 
+STATUS_GROUPS=('Seni bekliyor','Çalışıyor','Limit bekliyor','Sırada (auto)','Commit bekliyor')
+
+def status_summary(root):
+    """Short grouped view of what needs attention; closed tasks are hidden."""
+    groups={g:[] for g in STATUS_GROUPS}
+    for f in sorted((root/'tasks').glob('*/state.json')):
+        ident=f.parent.name
+        try: s=read(f)
+        except (OSError,ValueError) as e:
+            groups['Seni bekliyor'].append(f'{ident} ? — state okunamadı: {e}'); continue
+        a=s.get('automation') or {}; st=s.get('stage','?'); status=a.get('status')
+        row=lambda m: f'{ident} {st} — {" ".join(str(m or "").split())[:90]}'.rstrip(' —')
+        if st=='DONE':
+            if s.get('changed_files') and not s.get('commit'):
+                groups['Commit bekliyor'].append(row(f'{len(s["changed_files"])} dosya · {pass_label(s)} · team commit {ident}'))
+            continue
+        if st in CLOSED_STAGES: continue
+        # WAITING_FOR_LEAD is stale once Lead advanced past NEW; the runner refreshes it on its next round.
+        if st=='NEW' or status in ('AWAITING_USER','BLOCKED') or not a.get('enabled'):
+            groups['Seni bekliyor'].append(row(a.get('message') if a.get('enabled') else (a.get('message') or 'otomasyon kapalı')))
+        elif status=='RUNNING': groups['Çalışıyor'].append(row(f'{a.get("role")} · {a.get("message") or ""}'))
+        elif status=='WAITING_LIMIT': groups['Limit bekliyor'].append(row(f'retry_at {str(a.get("retry_at"))[:16]} · {a.get("message") or ""}'))
+        else: groups['Sırada (auto)'].append(row(a.get('message') if status!='WAITING_FOR_LEAD' else 'runner bekliyor'))
+    out=[]
+    for g,rows in groups.items():
+        if rows: out+=[f'{g} ({len(rows)})']+['  '+r for r in rows]
+    return '\n'.join(out) or 'Açık görev yok.'
+
 def role_prompt(root, role, ident=None):
     # Project-specific rules live in .ai/runner.json -> "role_prompt_extra" (optional string).
     rf=root/'.ai/runner.json'
@@ -638,7 +666,7 @@ def main():
     a.add_argument('--project',default=os.getcwd())
     sub=a.add_subparsers(dest='cmd',required=True)
     q=sub.add_parser('new'); q.add_argument('id'); q.add_argument('title'); q.add_argument('--profile',choices=[*WORKFLOWS,'auto'],default='full'); q.add_argument('--auto',action='store_true'); q.add_argument('--files',action='append',help='## Dosyalar globu (tekrarlanabilir)')
-    q=sub.add_parser('status'); q.add_argument('id',nargs='?')
+    q=sub.add_parser('status'); q.add_argument('id',nargs='?'); q.add_argument('--all',action='store_true',help='eski tam JSON görünümü')
     q=sub.add_parser('message'); q.add_argument('id'); q.add_argument('--from',dest='sender',choices=ROLES,required=True); q.add_argument('--to',choices=ROLES,required=True); q.add_argument('--body',required=True)
     q=sub.add_parser('inbox'); q.add_argument('role',choices=ROLES); q.add_argument('--task')
     q=sub.add_parser('advance'); q.add_argument('id'); q.add_argument('stage',choices=STAGES)
@@ -653,6 +681,7 @@ def main():
     q=sub.add_parser('resolve-gate'); q.add_argument('id'); q.add_argument('gate_id'); q.add_argument('--user-message-ref',required=True); q.add_argument('--outcome',choices=['cancelled','user-applied','explicitly-approved'],required=True)
     q=sub.add_parser('launch'); q.add_argument('role',choices=ROLES); q.add_argument('--task'); q.add_argument('--dry-run',action='store_true'); q.add_argument('--instruction')
     q=sub.add_parser('automate'); q.add_argument('id'); mode=q.add_mutually_exclusive_group(required=True); mode.add_argument('--enable',action='store_true'); mode.add_argument('--disable',action='store_true'); mode.add_argument('--resume',action='store_true')
+    q=sub.add_parser('close'); q.add_argument('id'); q.add_argument('--reason',required=True); q.add_argument('--abandon',action='store_true')
     q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
     sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
     args=a.parse_args()
@@ -676,13 +705,26 @@ def main():
             m=read(f)
             if not args.task or m['task']==args.task: print(json.dumps(m,ensure_ascii=False))
         return
+    if args.cmd=='status' and not args.id and not args.all:
+        print(status_summary(root)); return
     if args.cmd=='status':
         for p in ([task(root,args.id)] if args.id else sorted((root/'tasks').glob('*'))):
             if (p/'state.json').is_file(): print(json.dumps(read(p/'state.json'),ensure_ascii=False,indent=2))
         return
     with locked(root):
         p=task(root,args.id); s=read(p/'state.json')
-        if args.cmd=='advance':
+        if s['stage'] in ('CLOSED','ABANDONED') and args.cmd not in ('release','close'):
+            raise ValueError(f'Görev kapalı ({s["stage"]}); devam için yeni görev aç.')
+        if args.cmd=='close':
+            if s['stage'] in CLOSED_STAGES: raise ValueError('Görev zaten kapalı: '+s['stage'])
+            if s['developer']: raise ValueError('Release developer lock first.')
+            stage='ABANDONED' if args.abandon else 'CLOSED'
+            s['closed']={'stage':stage,'from_stage':s['stage'],'reason':args.reason,
+                         'by':os.environ.get('AI_TEAM_ROLE') or 'user','at':now()}
+            s['stage']=stage
+            s.setdefault('automation',{}).update(enabled=False,status=stage,role=None,run_id=None,
+                                                 message='Kapatıldı: '+args.reason,updated=now())
+        elif args.cmd=='advance':
             try: advance(root,p,s,args.stage)
             except Blocked as e:
                 s.setdefault('automation',{}).update(status='BLOCKED',role=None,run_id=None,message=str(e),updated=now())
