@@ -34,8 +34,8 @@ Komutlar macOS içindir; Linux'ta servis systemd ile kurulur (aşağıda).
    ```
 2. **ai-orchestra'yı kur:** yukarıdaki *Kurulum* (`git clone … && ./install.sh && team doctor`). `~/.local/bin` PATH'te değilse install.sh uyarır; `~/.zshrc`'ye ekle.
 3. **Projeyi uygun yere koy:** `~/Projects/<proje>` gibi. **`~/Desktop`, `~/Documents` altına koyma:** macOS izinleri (TCC) arka plan servisinin oradaki dosyalara erişmesini engeller, servis "exit 78" ile açılmaz.
-4. **Projeye ekibi kur:** proje klasöründe `claude` aç ve yaz: `bu projede gerekli kurulumları yap` (ya da `/orchestra-setup`). Beceri `team init` ile `.ai/`, `roles/`, `tasks/`, `AGENTS.md`, `CLAUDE.md`, `.ai/models.json`, `.ai/runner.json` oluşturur, projeyi salt okunur inceler, belgeleri doldurur ve yalnız yetki sorularını sorar (DB kimde, deploy/push kimde, Codex Verifier olsun mu). Commit/push yapmaz.
-5. **Projeyi kaydet:** `~/.config/ai-team/projects.json` içine kısa ad + yol yaz (örnek: `projects.example.json`). `team-tui <ad>` bu adı kullanır.
+4. **Projeye ekibi kur:** cmux'ta proje klasörüne geç ve `team-tui` yaz. Kurulum yoksa Claude açılır; `bu projede gerekli kurulumları yap` de (ya da `/orchestra-setup`). Bitince `/exit` ve tekrar `team-tui`: Lead, pano ve runner açılır. Beceri `team init` ile `.ai/`, `roles/`, `tasks/`, `AGENTS.md`, `CLAUDE.md`, `.ai/models.json`, `.ai/runner.json` oluşturur, projeyi salt okunur inceler, belgeleri doldurur ve yalnız yetki sorularını sorar (DB kimde, deploy/push kimde, Codex Verifier olsun mu). Commit/push yapmaz.
+5. **Proje kaydı:** kurulum projeyi `team register` ile `~/.config/ai-team/projects.json`'a kendisi ekler (ad = klasör adı); sonra her yerden `team-tui <ad>`. Elle: `team register [ad]`.
 6. **Ayarları gözden geçir** (`.ai/` altında, hepsi isteğe bağlı):
    - `models.json`: Developer varsayılanı her profilde Opus 5.5; diğer roller Sonnet.
    - `runner.json`: `codex_model` (ör. `gpt-6.1-sol`, Codex CLI ≥ 0.159.1), `codex_args` (öneri: `["--disable","plugins","--disable","apps","-c","agents.enabled=false"]`), `preflight` (ör. Docker gerektiren testler için `{"developer":["docker info"],"tester":["docker info"],"verifier":["docker info"]}`), `role_prompt_extra` (projeye özel test kapsamı/kurallar).
@@ -91,7 +91,7 @@ Tüm komutlar `--project <yol>` ile veya proje klasöründen çalışır; ayrın
 
 ## Terminal (varsayılan): team-tui
 
-`team-tui <proje>` (cmux içinde): runner'ı başlatır, sağda canlı panoyu açar, solda interaktif `claude` Lead olur.
+`team-tui [proje]` (cmux içinde): runner'ı başlatır, sağda canlı panoyu açar, solda interaktif `claude` Lead olur. Proje verilmezse bulunduğun klasör; kurulu değilse kurulum için Claude açılır.
 Lead ile anlık konuşursun; Lead görevi kapsamıyla kendisi açar (runner'ın ayrı Lead girişi atlanır).
 Pano: `↑↓` seç · `i` rol zaman çizelgesi/token ↔ canlı log · `r` yanıt · `a` devam · `c` iptal · `s` runner · `p` duraklat · `q` çık.
 Yalnız pano: `team-tui board <proje>`. Web arayüzü ikincildir.

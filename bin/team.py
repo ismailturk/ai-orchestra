@@ -67,6 +67,16 @@ def load_projects():
     f=projects_file()
     return read(f) if f.is_file() else {}
 
+def register(root,name=None):
+    """Add the project to ~/.config/ai-team/projects.json so `team-tui <name>` and Command Center find it; idempotent."""
+    root=Path(root).expanduser().resolve(); reg=load_projects()
+    for k,v in reg.items():
+        if Path((v.get('root') if isinstance(v,dict) else v) or '').expanduser().resolve()==root: return k
+    name=slug(name or re.sub(r'[^A-Za-z0-9_-]+','-',root.name).strip('-_').lower() or 'proje')
+    if name in reg: raise ValueError(f'"{name}" adı başka bir klasöre kayıtlı; başka ad ver: team register <ad>')
+    reg[name]={'root':str(root)}; f=config_dir()/'projects.json'; f.parent.mkdir(parents=True,exist_ok=True); atomic(f,reg)
+    return name
+
 def init_project(root,dry_run=False):
     """Create the missing ai-orchestra skeleton in an existing project dir; never touches existing files."""
     root=Path(root).expanduser().resolve()
@@ -1173,10 +1183,11 @@ def main():
     q.add_argument('--all',action='store_true'); q.add_argument('--out'); q.add_argument('--open',action='store_true'); q.add_argument('--serve',type=int)
     q=sub.add_parser('report'); q.add_argument('--days',type=float); q.add_argument('--task'); q.add_argument('--since',help='ISO tarih, ör. 2026-10-25T22:26')
     q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
-    sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
+    sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update'); q=sub.add_parser('register'); q.add_argument('name',nargs='?')
     args=a.parse_args()
     if args.cmd=='init': print(init_project(args.path or args.project,args.dry_run)); return
     if args.cmd=='update': print(update()); return
+    if args.cmd=='register': print('Kayıtlı: team-tui '+register(project(args.project or '.'),args.name)); return
     if args.cmd=='doctor':
         pr=Path(args.project).expanduser().resolve()
         lines,good=doctor(pr if (pr/'.ai/PROJECT.md').is_file() else None)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """AI Orchestra terminal UI.
 
-  team-tui <proje>        Lead (interaktif claude) solda, canlı pano sağda (cmux split); runner'ı başlatır
+  team-tui [proje]        Lead (interaktif claude) solda, canlı pano sağda (cmux split); runner'ı başlatır.
+                          Proje verilmezse bulunduğun klasör; kurulu değilse kurulum için Claude açılır.
   team-tui board <proje>  yalnız pano
 
 Pano salt-okunur bakar; yazdığı tek şeyler kullanıcının açık komutlarıdır (yanıt, iptal, devam, runner, duraklat).
@@ -45,18 +46,34 @@ Rol durursa runner önce kendi Lead karar turunu çalıştırır; görev yine BL
 Human gate (DB, deploy, push/merge, gerçek veri/hesap) yalnız kullanıcının bu konuşmadaki açık onayıyla."""
 
 
+SETUP_PROMPT = """Bu klasörde ({root}) AI Orchestra henüz kurulu değil. Kullanıcı "gerekli kurulumları yap" (ya da benzerini)
+derse orchestra-setup becerisini uygula. Kurulum bitince kullanıcıya bu oturumdan çıkıp (/exit) aynı klasörde
+`team-tui` komutunu yeniden çalıştırmasını söyle: Lead, canlı pano ve runner o zaman açılır."""
+
+
 def resolve(name):
     try:
         return name, orchestra.root_of(name)
     except ValueError:
         p = Path(name).expanduser()
         if (p / '.ai/PROJECT.md').is_file():
-            return p.resolve().name, team.project(p)
+            return team.register(p), team.project(p)  # a path works too; registering makes `team-tui <ad>` work next time
         raise
 
 
 def launch(name):
-    name, root = resolve(name)
+    try:
+        name, root = resolve(name)
+    except ValueError as error:
+        p = Path(name).expanduser()
+        if not p.is_dir():
+            sys.exit(f'{error}. Kayıtlı projeler: ' + (', '.join(orchestra.registry()) or '-'))
+        # Not set up yet: no runner or board to show; open Claude here for the setup skill.
+        print('Bu klasörde AI Orchestra kurulu değil. Claude açılıyor: "bu projede gerekli kurulumları yap" de;'
+              ' bitince /exit ve tekrar team-tui.')
+        os.chdir(p)
+        os.execvp('claude', ['claude', '--append-system-prompt', SETUP_PROMPT.format(root=p.resolve())])
+        return
     print('Runner:', orchestra.start_runner(root))
     board = f'{shlex.quote(sys.executable)} {shlex.quote(str(BIN / "tui.py"))} board {shlex.quote(str(root))}'
     if os.environ.get('CMUX_WORKSPACE_ID') and Path(CMUX).exists():
@@ -598,11 +615,11 @@ def board(name):
 
 
 def main(argv):
-    if not argv or argv[0] in ('-h', '--help'):
+    if argv and argv[0] in ('-h', '--help'):
         print(__doc__.strip()); print('\nProjeler:', ', '.join(orchestra.registry()) or '-'); return
     if argv[0] == 'board':
         return board(argv[1] if len(argv) > 1 else '.')
-    launch(argv[0])
+    launch(argv[0] if argv else '.')
 
 
 if __name__ == '__main__':

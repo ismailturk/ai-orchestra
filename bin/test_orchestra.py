@@ -399,5 +399,30 @@ class Tui(unittest.TestCase):
         self.assertFalse(tui.needs_user(rows[4]))  # a closed task's leftover gate does not wait on the user
 
 
+class Onboarding(Base):
+    def test_register_names_the_folder_and_is_idempotent(self):
+        with patch.object(team, 'ROOT', self.base):  # no repo projects.json fallback
+            self.assertEqual(team.register(self.root), 'proj')
+            self.assertEqual(team.register(self.root, 'other-name'), 'proj')  # same folder: existing name
+            twin = self.base / 'x' / 'proj'; twin.mkdir(parents=True)
+            with self.assertRaises(ValueError): team.register(twin)
+            self.assertEqual(team.register(twin, 'proj-2'), 'proj-2')
+            self.assertEqual(orchestra.registry()['proj'], self.root)
+
+    def test_tui_without_setup_opens_claude_for_the_setup_skill(self):
+        import tui
+        bare = self.base / 'yeni-proje'; bare.mkdir()
+        with patch.object(team, 'ROOT', self.base), patch('os.execvp') as ex, patch('os.chdir') as cd:
+            tui.launch(str(bare))
+        cd.assert_called_once_with(bare); argv = ex.call_args[0][1]
+        self.assertEqual(argv[:2], ['claude', '--append-system-prompt']); self.assertIn('orchestra-setup', argv[2])
+        with patch.object(team, 'ROOT', self.base), self.assertRaises(SystemExit):
+            tui.launch(str(self.base / 'yok'))
+        with patch.object(team, 'ROOT', self.base), patch.object(orchestra, 'start_runner', return_value='ok'), \
+                patch('os.execvp') as ex, patch('os.chdir'), patch.dict(os.environ, {'CMUX_WORKSPACE_ID': ''}):
+            tui.launch(str(self.root))  # set up: Lead prompt, and the folder is now registered by name
+        self.assertIn('LEAD oturumu', ex.call_args[0][1][2]); self.assertIn('proj', orchestra.registry())
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
