@@ -43,13 +43,25 @@ ROOT = Path(__file__).resolve().parent.parent
 # Hashing this file's bytes instead made every tool update (docs, a new command) stale all open evidence.
 GATE_VERSION = '2'
 
-DEFAULT_MODELS={"developer":"opus","developer_small":"sonnet","tester":"sonnet","analyst":"sonnet","designer":"sonnet","lead":"sonnet"}
+# Developer always on the strongest model (user 2026-10-25: fewer defects for Codex to find; quality > tokens).
+DEFAULT_MODELS={"developer":"claude-opus-5-5","tester":"sonnet","analyst":"sonnet","designer":"sonnet","lead":"sonnet"}
 DEFAULT_RUNNER={"max_parallel":3,"serial_roles":["tester","verifier","lead"]}
+
+def config_dir():
+    return Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'ai-team'
+
+def data_dir():
+    """Per-machine runtime data (task worktrees); never inside a project or this repo."""
+    return Path(os.environ.get('XDG_DATA_HOME') or Path.home()/'.local'/'share')/'ai-team'
 
 def projects_file():
     """Machine-specific registry wins; the repo file stays as a backward-compatible fallback."""
-    user=Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'ai-team'/'projects.json'
+    user=config_dir()/'projects.json'
     return user if user.is_file() else ROOT/'projects.json'
+
+def paused():
+    """Global "no new role starts" switch (Command Center / menu bar); running roles are never killed."""
+    return (config_dir()/'paused').exists()
 
 def load_projects():
     f=projects_file()
@@ -95,7 +107,8 @@ def init_project(root,dry_run=False):
     return '\n'.join(out)
 
 # Runtime output that should not be committed; `team init` suggests (never writes) these.
-GITIGNORE_SUGGEST=['.ai/runner-logs/','.ai/metrics.jsonl','.ai/dashboard.html','.ai/budget.json','.ai/.team.lock','.ai/.runner.lock']
+GITIGNORE_SUGGEST=['.ai/runner-logs/','.ai/metrics.jsonl','.ai/dashboard.html','.ai/budget.json','.ai/.team.lock','.ai/.runner.lock',
+                  '.ai/.runner.pid','.ai/memory.sqlite','.ai/context-shadow/']
 
 def doctor(root=None):
     """Short environment report; returns (lines, ok)."""
@@ -204,12 +217,16 @@ def scopes_conflict(a, b):
     pre = lambda g: re.split(r'[*?\[]', g, 1)[0]
     return any(pre(x).startswith(pre(y)) or pre(y).startswith(pre(x)) for x in a for y in b)
 
-def lock_conflict(root, scope, skip=None):
-    """Name of another task whose active developer lock overlaps `scope`, else None."""
+def lock_conflict(root, scope, skip=None, worktree=False):
+    """Name of another task whose active developer lock overlaps `scope`, else None.
+    Tasks in separate worktrees edit separate trees and never conflict with each other or the checkout."""
     for other in sorted((root / 'tasks').glob('*/state.json')):
         if other.parent.name == skip:
             continue
-        if read(other).get('developer') and scopes_conflict(scope, task_scope(other.parent)):
+        o = read(other)
+        if worktree or o.get('worktree'):
+            continue
+        if o.get('developer') and scopes_conflict(scope, task_scope(other.parent)):
             return other.parent.name
 
 TEST_ROOTS = {'test', 'tests', 'integration_test'}
@@ -221,7 +238,7 @@ GENERATED = {'GeneratedPluginRegistrant.java', 'GeneratedPluginRegistrant.h',
              'Generated.xcconfig', 'flutter_export_environment.sh'}
 
 
-def production_snapshot(root, scope=None):
+def production_snapshot(root, scope=None, sources=None):
     """Hash production source only, leaving test directories out.
 
     The verifier must add its own independent tests, which changes the full
@@ -229,13 +246,14 @@ def production_snapshot(root, scope=None):
     could never record the defect it had just found. Production code is what
     both test stages must agree on; each stage's tests are its own evidence.
     """
-    return snapshot(root, skip_tests=True, scope=scope)
+    return snapshot(root, skip_tests=True, scope=scope, sources=sources)
 
 
-def snapshot(root, skip_tests=False, scope=None):
+def snapshot(root, skip_tests=False, scope=None, sources=None):
     """Hash existing source, including dirty/untracked files; exclude coordination and build outputs.
 
     `scope` (task globs) limits hashing to matching files so other tasks' edits do not invalidate evidence.
+    `sources` replaces project.json source_roots (a task's isolated worktree, see task_sources).
     """
     scope_res = [glob_re(g) for g in scope] if scope else None
     digest = hashlib.sha256()
@@ -256,7 +274,7 @@ def snapshot(root, skip_tests=False, scope=None):
     if skip_tests:
         excluded = excluded | set(read(root / '.ai/project.json').get('test_roots', TEST_ROOTS))
     cfg = read(root / '.ai/project.json')
-    for base in sorted(cfg.get('source_roots', [str(root)])):
+    for base in sorted(sources or cfg.get('source_roots', [str(root)])):
         b = Path(base)
         if not b.is_dir():
             raise ValueError('Source root unavailable: ' + base)
@@ -352,18 +370,57 @@ def task_title(p, s):
 def git(root, *args):
     return subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
 
+def task_src(root, s):
+    """Directory the task's roles edit: its isolated worktree, else the project itself."""
+    w=s.get('worktree')
+    return Path(w['src']) if w else root
+
+def task_sources(root, s):
+    """Fingerprint roots for a task; None keeps project.json source_roots (legacy, shared checkout)."""
+    w=s.get('worktree')
+    return [w['src']] if w else None
+
+def make_worktree(root, ident):
+    """`git worktree add` on a new ai/<ID> branch from HEAD, outside the project. Never touches the
+    user's checkout, branch or uncommitted changes; never merges back."""
+    cfg=read(root/'.ai/project.json')
+    if [str(Path(x).resolve()) for x in cfg.get('source_roots',[str(root)])]!=[str(Path(root).resolve())]:
+        raise ValueError('Worktree yalnız tek kaynak kökü proje kökü olan projede (project.json source_roots).')
+    top=git(root,'rev-parse','--show-toplevel'); pre=git(root,'rev-parse','--show-prefix'); head=git(root,'rev-parse','HEAD')
+    if top.returncode or head.returncode: raise ValueError('Worktree için commit içeren bir git deposu gerekir.')
+    wt=data_dir()/'worktrees'/re.sub(r'[^A-Za-z0-9_.-]','-',str(cfg.get('id') or root.name))/ident
+    branch='ai/'+ident
+    r=git(Path(top.stdout.strip()),'worktree','add','-b',branch,str(wt),head.stdout.strip())
+    if r.returncode: raise ValueError('git worktree add başarısız: '+(r.stderr or r.stdout).strip())
+    src=wt/pre.stdout.strip()
+    # Untracked files the roles need in their cwd: Claude permission settings and agent rules (defaults),
+    # plus ignored build inputs the user lists in runner.json worktree_copy (e.g. local.properties).
+    # They are recorded and never committed from the worktree.
+    copied=[]
+    for g in WORKTREE_COPY+(runner_json(root).get('worktree_copy') or []):
+        for f in sorted(root.glob(g)):
+            rel=f.relative_to(root)
+            if f.is_file() and not f.is_symlink() and not (src/rel).exists():
+                (src/rel).parent.mkdir(parents=True,exist_ok=True); shutil.copy2(f,src/rel); copied.append(rel.as_posix())
+    return {'path':str(wt),'src':str(src),'branch':branch,'base':head.stdout.strip(),'created':now(),'copied':copied}
+
+WORKTREE_COPY=['.claude/settings.json','.claude/settings.local.json','AGENTS.md','CLAUDE.md']
+
 def commit(root, ident, apply=False, force=False):
     """Per-task commit proposal; DRY-RUN unless apply. Never pushes."""
     p = task(root, ident); s = read(p / 'state.json')
-    dirty = git_changes(root) or {}
-    files = [f for f in s.get('changed_files') or [] if f in dirty]
+    src = task_src(root, s)
+    dirty = git_changes(src) or {}
+    # A worktree belongs to this task alone: Tester/Verifier test files are part of the change set too.
+    files = (sorted(set(dirty) - set(s['worktree'].get('copied') or [])) if s.get('worktree')
+             else [f for f in s.get('changed_files') or [] if f in dirty])
     msg = f'{ident}: {task_title(p, s)}'
     out = []
     closed = s['stage'] in ('DONE', 'CLOSED')
     if not closed:
         out.append(f'UYARI: görev {s["stage"]} aşamasında (DONE/CLOSED değil); --apply için --force gerekir.')
     if not files:
-        head = git(root, 'rev-parse', 'HEAD').stdout.strip()
+        head = git(src, 'rev-parse', 'HEAD').stdout.strip()
         if s.get('changed_files') and not s.get('commit') and head:
             # Every task file is already clean: committed elsewhere. Record HEAD so status stops nagging.
             with locked(root):
@@ -381,13 +438,15 @@ def commit(root, ident, apply=False, force=False):
         both = sorted(set(files) & set(o.get('changed_files') or []))
         if both and o.get('stage') not in CLOSED_STAGES:
             out.append(f'UYARI: açık görev {other.parent.name} aynı dosyalara dokundu: ' + ', '.join(both))
-    cmds = [['git', '-C', str(root), 'add', '--', *files], ['git', '-C', str(root), 'commit', '-m', msg]]
+    cmds = [['git', '-C', str(src), 'add', '--', *files], ['git', '-C', str(src), 'commit', '-m', msg]]
+    if s.get('worktree'):
+        out.append(f'Dal: {s["worktree"]["branch"]} (izole worktree; main\'e merge/push yapılmaz)')
     out += ['Mesaj: ' + msg, 'Komutlar:'] + ['  ' + shlex.join(c) for c in cmds]
     if not apply:
         return '\n'.join(out + ['DRY-RUN: hiçbir şey çalıştırılmadı; uygulamak için --apply (push yapılmaz).'])
     if not closed and not force:
         raise ValueError('Görev DONE/CLOSED değil; yine de commit için --force ver.')
-    staged = git(root, 'diff', '--cached', '--name-only', '--relative', '-z')
+    staged = git(src, 'diff', '--cached', '--name-only', '--relative', '-z')
     extra = sorted(set(staged.stdout.split('\0')) - set(files) - {''})
     if staged.returncode or extra:
         raise ValueError('Başka staged değişiklik var, commit yapılmadı: ' + ', '.join(extra or ['git hatası']))
@@ -395,12 +454,19 @@ def commit(root, ident, apply=False, force=False):
         r = subprocess.run(c, capture_output=True, text=True)
         if r.returncode:
             raise ValueError('git başarısız: ' + (r.stderr or r.stdout).strip())
-    head = git(root, 'rev-parse', 'HEAD').stdout.strip()
+    head = git(src, 'rev-parse', 'HEAD').stdout.strip()
     with locked(root):
         s = read(p / 'state.json')
         s.update(commit=head, updated=now(), revision=s.get('revision', 0) + 1)
         atomic(p / 'state.json', s)
     return '\n'.join(out + ['Commit: ' + head + ' (push yok)'])
+
+LIMITS_DEFAULT={'max_reworks':MAX_REWORKS,'block_repeated_failure':True,
+                'task_minutes':None,'role_minutes':None}
+
+def limits(root):
+    """runner.json "limits": max_reworks, block_repeated_failure, task_minutes (summed role time), role_minutes (hard)."""
+    return {**LIMITS_DEFAULT,**(runner_json(root).get('limits') or {})}
 
 def knowledge_hashes(root):
     # CHANGELOG.md is appended by every closing fix task; it must not invalidate other tasks' knowledge ack.
@@ -412,11 +478,25 @@ def runner_json(root):
     try: return read(root/'.ai/runner.json')
     except (OSError,ValueError): return {}
 
+# Always risky, on top of runner.json risk_paths: dependency manifests, migrations, secrets, auth code.
+# A one-line change here is never a `fix` (escalates to `small`: independent verifier + knowledge).
+DEFAULT_RISK_PATHS=['pubspec.yaml','pubspec.lock','**/pubspec.yaml','package.json','**/package.json','package-lock.json',
+                    '**/*.csproj','**/packages.lock.json','requirements*.txt','pyproject.toml','**/Podfile','**/Podfile.lock',
+                    '**/build.gradle','**/build.gradle.kts','**/Migrations/**','**/migrations/**','**/.env*','.env*',
+                    '**/auth/**','**/security/**','**/*.pem','**/*.key']
+
 def risk_files(root, files):
-    res=[glob_re(g) for g in runner_json(root).get('risk_paths') or []]
+    res=[glob_re(g) for g in (runner_json(root).get('risk_paths') or [])+DEFAULT_RISK_PATHS]
     return [f for f in files if any(r.match(f) for r in res)]
 
-UI_WORDS=re.compile(r'\b(tasarım|tasarim|ekran|ui)\b',re.I)
+UI_WORDS=re.compile(r'\b(tasarım|tasarim|ekran\w*|ui)\b',re.I)
+# Size and risk are judged separately: a short request with these words is never routed to `fix`.
+SECURITY_WORDS=re.compile(r'(\bauth|login|oturum|session|token|jwt|parola|şifre|sifre|password|yetki|permission|güvenlik|guvenlik|'
+                          r'security|crypt|şifrele|sertifika|certificate|\bkvkk|gdpr)',re.I)
+CRITICAL_WORDS=re.compile(r'(migration|migrasyon|şema|schema|veritaban|database|\bdb\b|ödeme|odeme|payment|production|\bprod\b|'
+                          r'deploy|canlı ortam|canli ortam|toplu (sil|güncelle|gonder|gönder)|fcm|push bildirim|e-?posta gönder)',re.I)
+COMPLEX_WORDS=re.compile(r'(refactor|mimari|architecture|yeniden yaz|rewrite|baştan|bastan|tüm modül|tum modul|entegrasyon|integration)',re.I)
+LEVELS={'fix':'micro','tweak':'small','small':'small','ui':'standard','full':'complex','risky':'critical'}
 
 def project_files(root):
     """Existing project files (relative); git-tracked + untracked when git is there, else a walk."""
@@ -449,15 +529,46 @@ def scope_hits_risk(root, scope, risk):
     return False
 
 def suggest_profile(root, p=None, title=''):
-    """(profile, reason) for `--profile auto`."""
+    """(profile, reason) for `--profile auto`. Rule based (no LLM call); risk is judged apart from size."""
     text=title+'\n'+((p/'TASK.md').read_text() if p and (p/'TASK.md').is_file() else '')
+    m=CRITICAL_WORDS.search(text)
+    if m: return 'risky',f'kritik işlem sözcüğü "{m.group(0)}" (insan onayı zorunlu)'
+    m=COMPLEX_WORDS.search(text)
+    if m or len(text)>1500: return 'full',f'geniş kapsam ("{m.group(0)}")' if m else 'uzun/çok parçalı istek'
+    m=SECURITY_WORDS.search(text)
+    if m: return 'small',f'güvenlik/oturum sözcüğü "{m.group(0)}" (fix olamaz)'
     if UI_WORDS.search(text): return 'ui','TASK.md/başlık tasarım/ekran/UI içeriyor'
     scope=task_scope(p) if p else None
     risk=runner_json(root).get('risk_paths') or []
     if not scope: return 'small','## Dosyalar kapsamı yok'
     if len(scope)>3: return 'small',f'kapsam {len(scope)} glob (>3)'
     if risk and scope_hits_risk(root,scope,risk): return 'small','kapsam risk_paths ile kesişiyor'
+    if default_risk_hit(root,scope): return 'small','kapsam bağımlılık/auth/migration dosyasına dokunuyor'
     return 'fix',f'kapsam {len(scope)} glob, risk_paths dışı'
+
+def default_risk_hit(root, scope):
+    """Built-in risk globs against the scope's literal paths and existing files (no coarse prefix
+    fallback: '**/auth/**' would match every scope). Files created later are caught at DONE by risk_files."""
+    files=None
+    for g in scope:
+        if not re.search(r'[*?\[]',g):
+            if risk_files(root,[g]): return True
+            continue
+        if files is None: files=project_files(root)
+        sre=glob_re(g)
+        if risk_files(root,[x for x in files if sre.match(x)]): return True
+    return False
+
+def classify(root, text, files=None):
+    """{'profile','level','reason'} for a natural-language request (Command Center intake)."""
+    scratch=Path(tempfile.mkdtemp())
+    try:
+        (scratch/'TASK.md').write_text(text+('\n## Dosyalar\n'+''.join(f'- {g}\n' for g in files) if files else ''))
+        profile,reason=suggest_profile(root,scratch)
+    finally: shutil.rmtree(scratch)
+    # small + security words = standard: Tester and the independent verifier are mandatory.
+    level='standard' if profile=='small' and SECURITY_WORDS.search(text) else LEVELS[profile]
+    return {'profile':profile,'level':level,'reason':reason}
 
 def append_changelog(root, s):
     f=root/'.ai/CHANGELOG.md'
@@ -482,7 +593,7 @@ def reclassification_stage(state, new_path):
         earlier=[]
     return next((stage for stage in reversed(earlier) if stage in new_path),new_path[0])
 
-def create(root, ident, title, profile='full', auto=False, files=None):
+def create(root, ident, title, profile='full', auto=False, files=None, intake=None, worktree=False):
     ident = slug(ident)
     choice = None
     if profile == 'auto':
@@ -500,11 +611,18 @@ def create(root, ident, title, profile='full', auto=False, files=None):
         for doc in DOCS:
             content=(ROOT/'templates/task'/ (doc+'.md')).read_text()
             content=content.replace('{{TASK_ID}}',ident).replace('{{TITLE}}',title).replace('{{PROFILE}}',profile)
+            if doc == 'TASK' and intake:
+                content = content.rstrip('\n') + '\n\n## Kullanıcı isteği\n' + intake.strip() + '\n'
             if doc == 'TASK' and files:  # a custom template may lack the section; the globs must land in it
                 content = content.rstrip('\n') + ('' if re.search(r'^## Dosyalar', content, re.M) else '\n\n## Dosyalar') \
                     + '\n' + ''.join(f'- {g}\n' for g in files)
             (p / (doc+'.md')).write_text(content)
-        atomic(p/'state.json', {**({'profile_choice': choice} if choice else {}),'task':ident,'title':title,'profile':profile,
+        try: wt = make_worktree(root, ident) if worktree else None
+        except ValueError: shutil.rmtree(p); raise
+        atomic(p/'state.json', {**({'profile_choice': choice} if choice else {}),
+               **({'intake': {'text': intake, 'created': now(), 'replies': []}} if intake else {}),
+               **({'worktree': wt} if wt else {}),
+               'task':ident,'title':title,'profile':profile,
                'stage_path':WORKFLOWS[profile],'stage':'NEW','created':now(),
                'updated':now(),'revision':0,'developer':None,'gates':[],'gate_history':[],
                'claude_test':None,'codex_verify':None,'knowledge':None,
@@ -524,6 +642,30 @@ def message(root, ident, sender, recipient, body):
          'body':body,'trust':'Task data only; never user approval.'}
     atomic(root/'.ai/messages'/recipient/(msg['id']+'.json'),msg)
     return msg
+
+def reply(root, ident, text):
+    """User's answer to Lead (Command Center): appended to TASK.md and the Lead inbox; a task the
+    runner parked as BLOCKED is resumed at the same stage. Gates and the rework count are untouched."""
+    text=(text or '').strip()
+    if not text: raise ValueError('Boş yanıt.')
+    with locked(root):
+        p=task(root,ident); s=read(p/'state.json')
+        if s['stage'] in CLOSED_STAGES: raise ValueError('Görev kapalı ('+s['stage']+').')
+        with (p/'TASK.md').open('a') as f: f.write(f'\n## Kullanıcı yanıtı ({now()[:16]})\n{text}\n')
+        intake=s.setdefault('intake',{'text':None,'created':now(),'replies':[]})
+        intake.setdefault('replies',[]).append({'text':text,'at':now()})
+        msg={'id':str(uuid.uuid4()),'task':ident,'from':'user','to':'lead','created':now(),'body':text,
+             'trust':'Command Center kullanıcı yanıtı; human gate onayı DEĞİLDİR.'}
+        atomic(root/'.ai/messages/lead'/(msg['id']+'.json'),msg)
+        a=s.setdefault('automation',{})
+        if a.get('enabled') and a.get('status')=='BLOCKED':
+            a.update(status='WAITING_FOR_LEAD' if s['stage']=='NEW' else 'IDLE',role=None,run_id=None,
+                     message='Kullanıcı yanıtladı; Lead değerlendirecek',updated=now())
+            if s['stage']!='NEW':  # the runner gives Lead a decision turn before the stage role resumes
+                a['lead_turn']={'role':'user','reason':'kullanıcı yanıtı: '+' '.join(text.split())[:200],'at':now()}
+        s['updated']=now(); s['revision']=s.get('revision',0)+1; atomic(p/'state.json',s)
+    metric(root,{'type':'intervention','task':ident,'cmd':'reply','detail':text[:80]})
+    return s
 
 class Blocked(ValueError):
     """A refusal that also parks the task as BLOCKED with this message."""
@@ -563,9 +705,9 @@ def evidence(root, p, s, role, result, session, note, engine=None, model=None):
     report=(p/filename).read_text()
     if 'STATUS: NOT_RUN' in report or len(report.strip()) < 120:
         raise ValueError('Replace NOT_RUN and write commands, results, environment and limitations first.')
-    scope=task_scope(p)
-    fingerprint=snapshot(root,scope=scope)
-    production=production_snapshot(root,scope)
+    scope=task_scope(p); src=task_sources(root,s)
+    fingerprint=snapshot(root,scope=scope,sources=src)
+    production=production_snapshot(root,scope,src)
     if role=='verifier':
         first=s['claude_test']
         if not first or first['result']!='PASS':
@@ -596,7 +738,7 @@ def advance(root,p,s,stage):
         # Production source must be unchanged since each stage signed off. Test files
         # are excluded: every test stage adds its own, and requiring the whole tree to
         # stay byte-identical made the later stages impossible to satisfy.
-        fp=production_snapshot(root,task_scope(p))
+        fp=production_snapshot(root,task_scope(p),task_sources(root,s))
         for key,file in [('claude_test','TEST_CLAUDE.md')]+([('codex_verify','VERIFY_CODEX.md')] if stage!='VERIFY_CODEX' and 'VERIFY_CODEX' in path else []):
             e=s[key]
             if not e or e['result']!='PASS' or e.get('production_fingerprint',e['fingerprint'])!=fp or e['report_sha256']!=hashlib.sha256((p/file).read_bytes()).hexdigest():
@@ -606,7 +748,7 @@ def advance(root,p,s,stage):
         risky=risk_files(root,sorted(set(s.get('changed_files') or [])|set(s.get('out_of_scope_changes') or [])))
         reason='risk_paths'
         # Without git nothing records what changed; with risk_paths configured, escalate (safe side).
-        if not risky and runner_json(root).get('risk_paths') and git_changes(root) is None:
+        if not risky and runner_json(root).get('risk_paths') and git_changes(task_src(root,s)) is None:
             reason='no-git'
         if risky or reason=='no-git':
             # A fix that touched risk_paths gets the independent verifier and knowledge stages of `small`.
@@ -621,7 +763,7 @@ def advance(root,p,s,stage):
             raise ValueError('Risky profile requires a recorded human gate before DONE.')
         # Profiles without KNOWLEDGE_UPDATE may close after the same two independent test gates.
         if 'KNOWLEDGE_UPDATE' in path:
-            if not s['knowledge'] or s['knowledge']['fingerprint']!=snapshot(root,scope=task_scope(p)) or s['knowledge']['documents']!=knowledge_hashes(root):
+            if not s['knowledge'] or s['knowledge']['fingerprint']!=snapshot(root,scope=task_scope(p),sources=task_sources(root,s)) or s['knowledge']['documents']!=knowledge_hashes(root):
                 raise ValueError('Knowledge update acknowledgement required on same source.')
         if 'VERIFY_CODEX' in path and 'STATUS: NOT_RUN' in (p/'FINAL_REPORT.md').read_text():
             raise ValueError('Final report is not written.')
@@ -651,7 +793,8 @@ def status_summary(root):
         if st=='DONE':
             if s.get('changed_files') and not s.get('commit'):
                 if dirty is None: dirty=git_changes(root) or {}; engines=metric_engines(root)
-                pending=[x for x in s['changed_files'] if x in dirty]  # already-clean files need no commit
+                d=(git_changes(task_src(root,s)) or {}) if s.get('worktree') else dirty
+                pending=[x for x in s['changed_files'] if x in d]  # already-clean files need no commit
                 if pending: groups['Commit bekliyor'].append(row(f'{len(pending)} dosya · {pass_label(s,engines)} · team commit {ident}'))
             continue
         if st in CLOSED_STAGES: continue
@@ -659,10 +802,11 @@ def status_summary(root):
             warns.append(f'UYARI: {ident} kapsam dışı değişiklik: '+', '.join(s['out_of_scope_changes'][:5])
                          +(' …' if len(s['out_of_scope_changes'])>5 else ''))
         # WAITING_FOR_LEAD is stale once Lead advanced past NEW; the runner refreshes it on its next round.
-        if st=='NEW' or status in ('AWAITING_USER','BLOCKED') or not a.get('enabled'):
+        if (st=='NEW' and not s.get('intake')) or status in ('AWAITING_USER','BLOCKED') or not a.get('enabled'):
             groups['Seni bekliyor'].append(row(a.get('message') if a.get('enabled') else (a.get('message') or 'otomasyon kapalı')))
         elif status=='RUNNING': groups['Çalışıyor'].append(row(f'{a.get("role")} · {a.get("message") or ""}'))
         elif status=='WAITING_LIMIT': groups['Limit bekliyor'].append(row(f'retry_at {str(a.get("retry_at"))[:16]} · {a.get("message") or ""}'))
+        elif status in ('WAITING_DEP','WAITING_ENV'): groups['Limit bekliyor'].append(row(a.get('message') or status))
         else: groups['Sırada (auto)'].append(row(a.get('message') if status!='WAITING_FOR_LEAD' else 'runner bekliyor'))
     out=list(warns)
     for g,rows in groups.items():
@@ -847,8 +991,25 @@ def dashboard(roots, out=None, open_=False, serve=None):
 def _minutes(seconds):
     return f'{seconds/60:.1f} dk'
 
-def report(root, days=None, ident=None):
-    since=(utcnow()-dt.timedelta(days=days)).isoformat() if days else ''
+def quality_lines(runs):
+    """Defects that slipped past the cheaper gates: a tester/verifier run that sent the work back to
+    IMPLEMENTATION (metric field `to`, recorded since 2026-10-25). Per task, so retries do not inflate it."""
+    out=[]; seen={}
+    for r in runs:
+        if r.get('role') in ('tester','verifier') and 'to' in r:
+            seen.setdefault(r['role'],{}).setdefault(r.get('task'),False)
+            if r['to']=='IMPLEMENTATION': seen[r['role']][r.get('task')]=True
+    for role,label in (('tester','Tester'),('verifier','Verifier')):
+        t=seen.get(role)
+        if t: out.append(f'{label} işi geri çevirdi: {sum(t.values())}/{len(t)} görev (%{100*sum(t.values())//len(t)})')
+    tasks={r.get('task') for r in runs if r.get('task')}
+    if tasks:
+        full=sum(((r.get('tokens') or {}).get(k) or 0) for r in runs for k in ('input','output','cache_creation'))
+        out.append(f'Görev başına: {len(runs)/len(tasks):.1f} tur · {full/len(tasks)/1e3:.0f}K tam fiyat token ({len(tasks)} görev)')
+    return out
+
+def report(root, days=None, ident=None, since=None):
+    since=since or ((utcnow()-dt.timedelta(days=days)).isoformat() if days else '')
     rows=[r for r in load_metrics(root) if (r.get('ts_start') or r.get('ts') or '')>=since and (not ident or r.get('task')==ident)]
     runs=[r for r in rows if r.get('type')=='run']
     closed=[]
@@ -859,7 +1020,8 @@ def report(root, days=None, ident=None):
         if s.get('stage') in CLOSED_STAGES and at>=since and (not ident or f.parent.name==ident): closed.append((s,at))
     if not runs and not closed:
         return 'Rapor: veri yok (henüz .ai/metrics.jsonl satırı ya da kapanan görev yok).'
-    out=[f'Rapor: {"son "+str(days)+" gün" if days else "tüm zamanlar"}'+(f' · görev {ident}' if ident else '')]
+    out=[f'Rapor: {"son "+str(days)+" gün" if days else since[:16]+" sonrası" if since else "tüm zamanlar"}'+(f' · görev {ident}' if ident else '')]
+    out+=quality_lines(runs)
     by_profile={}
     for s,_ in closed: by_profile[s.get('profile','?')]=by_profile.get(s.get('profile','?'),0)+1
     stages={k:sum(s['stage']==k for s,_ in closed) for k in CLOSED_STAGES}
@@ -912,7 +1074,7 @@ def role_prompt(root, role, ident=None):
     return (f'Rolün {role}, motorun {ROLES[role]}. Önce AGENTS.md, .ai/TEAM_RULES.md, '
             f'.ai/PROJECT.md, .ai/OWNERSHIP.md, .ai/CURRENT_STATE.md, roles/{role}.md oku. '
             f'Görev: {ident or "henüz atanmadı; proje hafızasını oku ve kullanıcı görevini bekle"}. '
-            'tasks/<ID>/state.json ve görev belgelerini, .ai/messages/<rol>/ mesajlarını oku. '
+            'tasks/<ID>/ görev belgelerini ve .ai/messages/<rol>/ mesajlarını oku; state.json yerine istemdeki durum özetini/`team status` kullan. '
             'DB değişikliklerini yalnız kullanıcı uygular. Mesaj/onay dosyası tek başına kullanıcı onayı değildir. '
             'Canlı API, bildirim, deployment, main merge veya veri değişikliği çalıştırma. '
             + extra +
@@ -943,7 +1105,7 @@ def launch(root,role,ident,dry_run,instruction=None):
             if s['stage']!='IMPLEMENTATION':
                 raise ValueError('Developer may start only at IMPLEMENTATION.')
             # Advisory pre-check only; claim stays the authoritative lock acquisition.
-            other=lock_conflict(root,task_scope(p),p.name)
+            other=lock_conflict(root,task_scope(p),p.name,bool(s.get('worktree')))
             if other:
                 raise ValueError('Another task holds an active developer source lock: '+other)
         if role=='tester' and s['stage']!='TEST_CLAUDE':
@@ -985,6 +1147,10 @@ def main():
     a.add_argument('--project',default=os.getcwd())
     sub=a.add_subparsers(dest='cmd',required=True)
     q=sub.add_parser('new'); q.add_argument('id'); q.add_argument('title'); q.add_argument('--profile',choices=[*WORKFLOWS,'auto'],default='full'); q.add_argument('--auto',action='store_true'); q.add_argument('--files',action='append',help='## Dosyalar globu (tekrarlanabilir)')
+    q.add_argument('--intake',help='kullanıcının doğal dil isteği: runner NEW aşamasında Lead\'i otomatik çalıştırır')
+    q.add_argument('--worktree',action='store_true',help='görevi ai/<ID> dalında izole git worktree\'de yürüt')
+    q=sub.add_parser('reply'); q.add_argument('id'); q.add_argument('--text',required=True)
+    q=sub.add_parser('classify'); q.add_argument('text'); q.add_argument('--files',action='append')
     q=sub.add_parser('status'); q.add_argument('id',nargs='?'); q.add_argument('--all',action='store_true',help='eski tam JSON görünümü')
     q=sub.add_parser('message'); q.add_argument('id'); q.add_argument('--from',dest='sender',choices=ROLES,required=True); q.add_argument('--to',choices=ROLES,required=True); q.add_argument('--body',required=True)
     q=sub.add_parser('inbox'); q.add_argument('role',choices=ROLES); q.add_argument('--task')
@@ -1005,7 +1171,7 @@ def main():
     q=sub.add_parser('budget'); q.add_argument('--resume',action='store_true'); q.add_argument('--task')
     q=sub.add_parser('dashboard'); q.add_argument('--project',dest='dash_projects',action='append',default=None)
     q.add_argument('--all',action='store_true'); q.add_argument('--out'); q.add_argument('--open',action='store_true'); q.add_argument('--serve',type=int)
-    q=sub.add_parser('report'); q.add_argument('--days',type=float); q.add_argument('--task')
+    q=sub.add_parser('report'); q.add_argument('--days',type=float); q.add_argument('--task'); q.add_argument('--since',help='ISO tarih, ör. 2026-10-25T22:26')
     q=sub.add_parser('commit'); q.add_argument('id'); q.add_argument('--apply',action='store_true'); q.add_argument('--force',action='store_true')
     sub.add_parser('doctor'); q=sub.add_parser('init'); q.add_argument('path',nargs='?'); q.add_argument('--dry-run',action='store_true'); sub.add_parser('update')
     args=a.parse_args()
@@ -1038,11 +1204,13 @@ def main():
             metric(root,{'type':'intervention','task':None,'cmd':'budget','detail':'resume'})
         print(budget_text(root)); return
     if args.cmd=='new':
-        p=create(root,args.id,args.title,args.profile,args.auto,args.files)
+        p=create(root,args.id,args.title,args.profile,args.auto,args.files,args.intake,args.worktree)
         c=read(p/'state.json').get('profile_choice')
         if c: print(f"Profil: {c['profile']} (auto) — {c['reason']}")
         print(p); return
-    if args.cmd=='report': print(report(root,args.days,args.task)); return
+    if args.cmd=='report': print(report(root,args.days,args.task,args.since)); return
+    if args.cmd=='reply': reply(root,args.id,args.text); print('Yanıt Lead\'e iletildi: '+args.id); return
+    if args.cmd=='classify': print(json.dumps(classify(root,args.text,args.files),ensure_ascii=False)); return
     if args.cmd=='commit': print(commit(root,args.id,args.apply,args.force)); return
     if args.cmd=='launch': print(launch(root,args.role,args.task,args.dry_run,args.instruction)); return
     if args.cmd=='message': print(json.dumps(message(root,args.id,args.sender,args.to,args.body),ensure_ascii=False)); return
@@ -1079,12 +1247,18 @@ def main():
         elif args.cmd=='rework':
             if s['developer']: raise ValueError('Release developer lock first.')
             # Every rework cycle needs its own CURRENT_STATE update; the old baseline must not satisfy it.
+            same=' '.join(args.reason.lower().split())==' '.join(str(s.get('rework_reason') or '').lower().split())
             s.update(stage='IMPLEMENTATION',claude_test=None,codex_verify=None,knowledge=None,
                      knowledge_baseline=knowledge_hashes(root),rework_reason=args.reason,
                      rework_count=s.get('rework_count',0)+1)
-            if s['rework_count']>MAX_REWORKS:
+            limit=limits(root)['max_reworks']
+            if s['rework_count']>limit:
                 s.setdefault('automation',{}).update(status='BLOCKED',role=None,run_id=None,updated=now(),
-                    message=f'{MAX_REWORKS} düzeltme turu aşıldı — Lead/kullanıcı kararı')
+                    message=f'{limit} düzeltme turu aşıldı — Lead/kullanıcı kararı')
+            elif same and limits(root)['block_repeated_failure']:
+                # The same failure twice in a row: another identical round would only burn tokens.
+                s.setdefault('automation',{}).update(status='BLOCKED',role=None,run_id=None,updated=now(),
+                    message='Aynı hata tekrarlandı: '+args.reason[:200]+' — Lead/kullanıcı kararı')
         elif args.cmd=='reclassify':
             if s['developer']: raise ValueError('Release developer lock first.')
             old=s.get('profile','full')
@@ -1107,22 +1281,22 @@ def main():
                      reclassification={'from':old,'to':args.profile,'reason':args.reason,'at':now()})
         elif args.cmd=='claim':
             if s['stage']!='IMPLEMENTATION': raise ValueError('Not implementation stage.')
-            if lock_conflict(root,task_scope(p)): raise ValueError('Another developer source lock is active.')
+            if lock_conflict(root,task_scope(p),p.name,bool(s.get('worktree'))): raise ValueError('Another developer source lock is active.')
             s['developer']={'session':args.session,'at':now()}
-            atomic(claim_baseline(root,p.name),git_changes(root))
+            atomic(claim_baseline(root,p.name),git_changes(task_src(root,s)))
         elif args.cmd=='release':
             if not s['developer'] or s['developer']['session']!=args.session: raise ValueError('Lock belongs to another session.')
             s['developer']=None
             base=claim_baseline(root,p.name)
             if base.is_file():
-                add_changed(p,s,read(base),git_changes(root)); base.unlink()
+                add_changed(p,s,read(base),git_changes(task_src(root,s))); base.unlink()
         elif args.cmd=='evidence': evidence(root,p,s,args.role,args.result,args.session,args.note,args.engine,args.model)
         elif args.cmd=='knowledge':
             if s['stage']!='KNOWLEDGE_UPDATE': raise ValueError('Wrong stage.')
             docs=knowledge_hashes(root)
             if not docs.get('CURRENT_STATE.md') or docs.get('CURRENT_STATE.md')==s['knowledge_baseline'].get('CURRENT_STATE.md'):
                 raise ValueError('Update CURRENT_STATE.md with task outcome before acknowledging knowledge.')
-            s['knowledge']={'summary':args.summary,'created':now(),'fingerprint':snapshot(root,scope=task_scope(p)),'documents':docs}
+            s['knowledge']={'summary':args.summary,'created':now(),'fingerprint':snapshot(root,scope=task_scope(p),sources=task_sources(root,s)),'documents':docs}
         elif args.cmd=='gate':
             s['gates'].append({'id':str(uuid.uuid4()),'kind':args.kind,'action':args.action,
                 'target':args.target,'environment':args.environment,'status':'AWAITING_USER','created':now()})
@@ -1139,9 +1313,10 @@ def main():
                          message='Lead tarafindan durduruldu',updated=now())
             else:
                 s['rework_count']=0
+                if args.resume: s['time_override']=True
                 a.update(enabled=True,
                          status='WAITING_FOR_LEAD' if s['stage']=='NEW' else 'IDLE',
-                         role=None,run_id=None,
+                         role=None,run_id=None,stalled=None,  # devam = run again even with unchanged inputs
                          message='Otomatik akis etkin',updated=now())
         s['updated']=now();s['revision']+=1;atomic(p/'state.json',s)
         # Manual steps outside a runner role (no AI_TEAM_RUN_ID); Lead's NEW→first stage is the normal start.

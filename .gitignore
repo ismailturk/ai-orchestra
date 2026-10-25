@@ -6,6 +6,10 @@ backups/
 validation/
 bin/*.bak
 .DS_Store
+# yerel calisma verisi (hicbir projede commit edilmez)
+.ai/memory.sqlite
+.ai/context-shadow/
+.ai/.runner.pid
 # makineye/projeye ozel (yerelde kalir)
 KURULUM-RAPORU.md
 GOREV-SURECI-IYILESTIRME.md

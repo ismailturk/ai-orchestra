@@ -24,7 +24,26 @@ class RunnerTests(unittest.TestCase):
         for doc in team.DOCS:
             (self.templates/f'{doc}.md').write_text('{{TASK_ID}} {{TITLE}}\nSTATUS: NOT_RUN\n'+'x'*140)
         self.root_patch = patch.object(team, 'ROOT', self.templates.parent.parent)
+        iso = patch.dict('os.environ', {'XDG_CONFIG_HOME': str(Path(self.tmp.name) / 'cfg'),
+                                        'CODEX_HOME': str(Path(self.tmp.name) / 'codex')})
+        iso.start(); self.addCleanup(iso.stop)
         self.root_patch.start(); self.addCleanup(self.root_patch.stop)
+
+    def test_verifier_preflight_probes_the_toolchain_in_its_own_sandbox(self):
+        cfg = {}
+        self.assertIsNone(team_runner.sandbox_probe(self.root, {}))  # no Flutter/.NET project: nothing to probe
+        (self.root / 'pubspec.yaml').write_text('name: x')
+        team_runner._preflight.clear()
+        with patch.object(team_runner, 'executable', return_value='/usr/bin/false'):
+            label, argv, cwd = team_runner.sandbox_probe(self.root, {})
+            self.assertEqual((argv[1], argv[-2:], cwd), ('sandbox', ['flutter', '--version'], self.root))
+            self.assertIn('sandbox_mode="workspace-write"', argv)
+            self.assertIn("Codex sandbox'ında `flutter --version` başarısız", team_runner.preflight(self.root, 'verifier', cfg, {}))
+            self.assertIsNone(team_runner.preflight(self.root, 'tester', cfg, {}))  # verifier only
+        team_runner._preflight.clear()
+        with patch.object(team_runner, 'executable', return_value='/usr/bin/true'):
+            self.assertIsNone(team_runner.preflight(self.root, 'verifier', cfg, {}))
+        team_runner._preflight.clear()
 
     def test_legacy_and_disabled_tasks_are_never_dispatched(self):
         team.create(self.root, 'OFF-001', 'off')
@@ -83,6 +102,10 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn('dangerously-bypass', rendered)
         self.assertNotIn('-a never', rendered)
         self.assertIn('workspace-write', rendered)
+        (self.root / '.ai/runner.json').write_text(json.dumps({'codex_args': ['-c', 'model_reasoning_effort="high"', '--disable', 'plugins']}))
+        command, _, _ = team_runner.command_for(self.root,'AUTO-004',state,'verifier',prompt,'run-1')
+        self.assertEqual(command[2:6], ['-c', 'model_reasoning_effort="high"', '--disable', 'plugins'])
+        self.assertEqual(command[-1], prompt)
 
     def test_long_turn_warns_in_state_without_stopping_process(self):
         p = team.create(self.root, 'AUTO-005', 'long turn warning')
@@ -247,7 +270,9 @@ class RunnerTests(unittest.TestCase):
         at = team_runner.limit_retry(log, now)
         self.assertEqual(at.astimezone(team_runner.timezone.utc).strftime('%H:%M'), '18:12')
         log.write_text('getaddrinfo ENOTFOUND api.anthropic.com')
-        self.assertEqual(team_runner.limit_retry(log, now), now + team_runner.timedelta(minutes=20))
+        self.assertEqual(team_runner.limit_retry(log, now), now + team_runner.timedelta(minutes=2))  # network: fast retry
+        log.write_text('{"type": "error", "message": "You’ve hit your usage limit. ... or try again at 9:31 PM."}')
+        self.assertEqual(team_runner.limit_retry(log, now).astimezone().strftime('%H:%M'), '21:33')  # Codex wording
         log.write_text('Error: tests failed')
         self.assertIsNone(team_runner.limit_retry(log, now))
 
@@ -337,6 +362,105 @@ class RunnerTests(unittest.TestCase):
             fcntl.flock(held, fcntl.LOCK_UN); held.close(); th.join(5)
         self.assertTrue(got.is_set())
         self.assertEqual(log.getvalue().count('Başka bir Team Runner çalışıyor'), 1)  # one line, not per retry
+
+
+
+class QuotaTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        iso = patch.dict('os.environ', {'XDG_CONFIG_HOME': self.tmp.name, 'CODEX_HOME': self.tmp.name, 'TEAM_NOW_OFFSET': '0'})
+        iso.start(); self.addCleanup(iso.stop)
+        import quota
+        self.q = quota
+        self.now = team.utcnow().timestamp()
+
+    def log(self, *lines):
+        f = Path(self.tmp.name) / 'role.log'
+        f.write_text('\n'.join(l if isinstance(l, str) else json.dumps(l) for l in lines) + '\n')
+        return f
+
+    def test_interruption_reads_only_the_clis_own_errors(self):
+        now = team_runner.datetime(2026, 10, 24, 12, 0, tzinfo=team_runner.timezone.utc)
+        weekly = self.log({'type': 'result', 'is_error': True, 'api_error_status': 429,
+                           'result': "You've hit your weekly limit · resets Oct 25 at 5pm (Europe/Istanbul)"})
+        kind, at = team_runner.interruption(weekly, now)
+        self.assertEqual((kind, at.astimezone(team_runner.timezone.utc).strftime('%m-%d %H:%M')), ('limit', '10-25 14:02'))
+        tool_noise = self.log({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'server overloaded, ENOTFOUND'}]}},
+                              {'type': 'result', 'is_error': False, 'result': 'BLOCKED: Docker yok'})
+        self.assertEqual(team_runner.interruption(tool_noise, now), (None, None))  # a test's output is not our failure
+        codex = self.log({'type': 'turn.failed', 'error': {'message': "You've hit your usage limit. Try again at 4:31 PM."}})
+        self.assertEqual(team_runner.interruption(codex, now)[0], 'limit')
+        later = team_runner.interruption(self.log({'type': 'turn.failed', 'error': {'message':
+            "You’ve hit your usage limit. Visit https://x/settings/usage to purchase more credits or try again at Oct 30th, 2026 4:31 PM."}}), now)[1]
+        self.assertEqual((later.astimezone().strftime('%Y-%m-%d'), later.minute), ('2026-10-30', 33))  # not "today 4:31"
+        self.assertEqual(team_runner.interruption(self.log({'type': 'turn.failed', 'error': {'message':
+            'Your workspace is out of credits. Try again later.'}}), now), ('limit', now + team_runner.LIMIT_FALLBACK + team_runner.timedelta(minutes=2)))
+        exact = team_runner.interruption(self.log({'type': 'result', 'is_error': True, 'result': 'x'}), now, reset_epoch=now.timestamp() + 600)
+        self.assertEqual(exact, ('limit', now + team_runner.timedelta(seconds=600 + 120)))
+        net = self.log('API Error: getaddrinfo ENOTFOUND api.anthropic.com')
+        self.assertEqual([team_runner.interruption(net, now, attempt=a)[1] - now for a in (1, 2, 9)],
+                         [team_runner.timedelta(minutes=m) for m in (2, 5, 20)])
+
+    def test_admission_counts_runs_in_flight_and_frees_at_the_reset(self):
+        win = lambda u, reset: {'five_hour': (u, reset), 'seven_day': (0.3, self.now + 5 * 86400)}
+        self.q.observe('claude', win(0.6, self.now + 3600))
+        ok, _, _ = self.q.admit('claude', {'five_hour': 0.12, 'seven_day': 0.01})
+        self.assertTrue(ok)
+        self.q.reserve('r1', 'claude', {'five_hour': 0.3, 'seven_day': 0.01})
+        ok, until, why = self.q.admit('claude', {'five_hour': 0.12, 'seven_day': 0.01})
+        self.assertFalse(ok); self.assertEqual(until, int(self.now + 3600) + 60); self.assertIn('+%30 çalışan', why)
+        self.q.observe('claude', win(0.8, self.now + 3600))  # r1 has used 0.2 of its 0.3 so far
+        self.assertIn('+%10 çalışan', self.q.admit('claude', {'five_hour': 0.12, 'seven_day': 0.01})[2])
+        self.q.release('r1')
+        self.assertTrue(self.q.admit('claude', {'five_hour': 0.12, 'seven_day': 0.01})[0])
+        self.q.observe('claude', win(0.9, self.now - 1), at=self.now + 1)  # window already reset: counts as empty
+        self.assertTrue(self.q.admit('claude', {'five_hour': 0.5, 'seven_day': 0.01})[0])
+        self.q.observe('codex', {'five_hour': (0.02, self.now + 900)})
+        self.assertTrue(self.q.admit('codex', {'five_hour': 2.0})[0])  # an estimate above a whole window never deadlocks
+
+    def test_claude_usage_command_refreshes_the_snapshot_without_a_model_call(self):
+        report = {'type': 'assistant', 'usage_report': {'rate_limits': {'limits': [  # shape of a real /usage reply
+            {'kind': 'session', 'group': 'session', 'percent': 61, 'resets_at': '2026-10-25T16:49:59.616086+00:00'},
+            {'kind': 'weekly_all', 'group': 'weekly', 'percent': 100, 'resets_at': '2026-10-29T18:59:59+00:00'}]}}}
+        fake = Path(self.tmp.name) / 'claude'
+        fake.write_text(f"#!/bin/sh\necho 'Warning: no stdin'\necho '{json.dumps(report)}'\n"); fake.chmod(0o755)
+        epoch = lambda iso: team_runner.datetime.fromisoformat(iso).timestamp()
+        self.assertEqual(self.q.observe_claude(str(fake)), {'five_hour': (0.61, epoch('2026-10-25T16:49:59.616086+00:00')),
+                                                            'seven_day': (1.0, epoch('2026-10-29T18:59:59+00:00'))})
+        snap = self.q.load()['claude']
+        self.assertEqual((snap['status'], snap['windows']['five_hour']['util']), ('rejected', 0.61))
+        self.assertIsNone(self.q.observe_claude(str(Path(self.tmp.name) / 'missing')))
+
+    def test_claude_and_codex_telemetry_map_to_the_same_windows(self):
+        wins, status = self.q.claude_windows({'type': 'rate_limit_event', 'rate_limit_info': {
+            'status': 'rejected', 'rateLimitType': 'seven_day', 'resetsAt': 99,
+            'unifiedWindows': {'five_hour': {'utilization': 0.4, 'resetsAt': 50}, 'seven_day': {'utilization': 0.99, 'resetsAt': 99}}}})
+        self.assertEqual((wins, status), ({'five_hour': (0.4, 50), 'seven_day': (1.0, 99)}, 'rejected'))
+        self.assertEqual(self.q.codex_windows({'primary': {'used_percent': 36.0, 'window_minutes': 300, 'resets_at': 7},
+                                               'secondary': {'used_percent': 15.0, 'window_minutes': 10080, 'resets_at': 8}}),
+                         {'five_hour': (0.36, 7), 'seven_day': (0.15, 8)})
+
+    def test_expected_cost_uses_measured_runs_after_five(self):
+        root = Path(self.tmp.name)
+        (root / '.ai').mkdir()
+        self.assertEqual(self.q.expected(root, 'claude', 'developer', 'opus')['five_hour'], 0.12)
+        for d in (0.05, 0.07, 0.06, 0.08, 0.06):
+            team.metric(root, {'type': 'run', 'role': 'developer', 'model': 'claude-opus-5-5', 'quota': {'engine': 'claude', 'five_hour': d, 'seven_day': 0.01}})
+        self.assertEqual(self.q.expected(root, 'claude', 'developer', 'opus')['five_hour'], 0.06)
+        self.assertEqual(self.q.expected(root, 'claude', 'developer', 'sonnet')['five_hour'], 0.05)  # other model: default
+        for d in (0.5, 0.4, 0.6, 0.5, 0.5):
+            team.metric(root, {'type': 'run', 'role': 'verifier', 'model': 'gpt-5.6-sol', 'quota': {'engine': 'codex', 'five_hour': d}})
+        self.assertEqual(self.q.expected(root, 'codex', 'verifier', 'gpt-5.6-sol')['five_hour'], 0.5)
+        self.assertEqual(self.q.expected(root, 'codex', 'verifier', 'gpt-6.1-sol')['five_hour'], 0.25)
+
+    def test_roles_and_services_bypass_terminal_shims(self):
+        base = Path(self.tmp.name)
+        shim, real = base / 'T/cmux-cli-shims/ABC', base / 'bin'
+        for d in (shim, real):
+            d.mkdir(parents=True); (d / 'codex').write_text('#!/bin/sh\n'); (d / 'codex').chmod(0o755)
+        with patch.dict('os.environ', {'PATH': f'{shim}{team_runner.os.pathsep}{real}'}):
+            self.assertEqual(team_runner.executable('codex'), str(real / 'codex'))
+            self.assertEqual(team_runner.agent_env()['PATH'], str(real))
 
 
 if __name__ == '__main__':

@@ -8,3 +8,6 @@ Yalnız göreve ilgili testleri koş; Tester'ın kanıtını kopyalamak yerine k
 
 Her tur öncesi .ai/messages/verifier/ oku. Proje .ai/TEAM_RULES.md istisnaları geçerlidir.
 Bağımsızlık: kabul kriterlerinden en az bir kontrolü kendin türet ve çalıştır; VERIFY_CODEX.md'de "## Bağımsız kontroller" başlığı altında komut + sonuçla listele. Tester ile aynı motordaysan kapanış "PASS (tek model)" olarak etiketlenir.
+
+## Tek turda tam liste
+İlk bulguda durma: kabul kriterlerinin tamamını ve `roles/tester.md` "PASS öncesi sert kontrol" sınıflarını tara; bütün must-fix bulguları tek raporda numaralı ver (F-1, F-2 …), her biri için somut senaryo, en küçük düzeltme ve kusuru gösteren test. Rework turunda önceki bulguları yeniden doğrula ve düzeltmenin aynı kök nedenli kardeş yollarını da kontrol et. (Ölçüm 2026-10-25: her turda tek bulgu raporlandığı için bir görev 5, bir diğeri 4 kez geri döndü; her dönüş Developer + Tester + Verifier turu demek.)

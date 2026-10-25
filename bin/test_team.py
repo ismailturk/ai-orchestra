@@ -86,6 +86,14 @@ class TeamTests(unittest.TestCase):
         (self.root/'source.txt').write_text('v2')
         with self.assertRaises(ValueError):team.advance(self.root,self.p,self.s,'VERIFY_CODEX')
 
+    def test_quality_lines_count_tasks_sent_back_once(self):
+        run = lambda task, role, to: {'type': 'run', 'task': task, 'role': role, 'to': to, 'tokens': {'input': 1000, 'output': 0}}
+        lines = team.quality_lines([run('A', 'verifier', 'IMPLEMENTATION'), run('A', 'verifier', 'IMPLEMENTATION'),
+                                    run('A', 'verifier', 'KNOWLEDGE_UPDATE'), run('B', 'verifier', 'KNOWLEDGE_UPDATE'),
+                                    run('B', 'tester', 'VERIFY_CODEX'), {'type': 'run', 'task': 'C', 'role': 'verifier'}])
+        self.assertIn('Verifier işi geri çevirdi: 1/2 görev (%50)', lines)
+        self.assertIn('Tester işi geri çevirdi: 0/1 görev (%0)', lines)
+
     def test_report_tamper_invalidates_stage(self):
         self.s['stage']='TEST_CLAUDE';self.pass_report('tester','claude-1')
         with (self.p/'TEST_CLAUDE.md').open('a') as f:f.write('modified')
@@ -550,10 +558,10 @@ class TeamTests(unittest.TestCase):
 
     def test_fourth_rework_blocks_task_and_resume_resets_cli(self):
         p=team.create(self.root,'RW-1','rw','small',True);self.cli('advance','RW-1','IMPLEMENTATION')
-        for _ in range(3):
-            self.cli('rework','RW-1','--reason','x')
+        for i in range(3):  # distinct failures; an identical one twice in a row blocks earlier (test below)
+            self.cli('rework','RW-1','--reason',f'x{i}')
         self.assertNotEqual(team.read(p/'state.json')['automation']['status'],'BLOCKED')
-        self.cli('rework','RW-1','--reason','x')
+        self.cli('rework','RW-1','--reason','x3')
         auto=team.read(p/'state.json')['automation']
         self.assertEqual(auto['status'],'BLOCKED');self.assertIn('3 düzeltme turu aşıldı',auto['message'])
         self.cli('automate','RW-1','--resume')

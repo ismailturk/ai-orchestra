@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Orchestra</title>
+<style>
+:root{--bg:#f5f6f8;--side:#fbfbfd;--card:#fff;--fg:#14151a;--fg2:#3a3d47;--mut:#6c707c;--line:#e6e8ec;--soft:#f1f2f5;--soft2:#e9ebf0;
+--acc:#5046e5;--acc2:#7c74ff;--acc-fg:#fff;--ok:#14965a;--warn:#c2700a;--bad:#d42d2d;--info:#2563eb;
+--sh:0 1px 2px rgba(16,24,40,.04),0 2px 6px rgba(16,24,40,.05);--sh2:0 24px 64px rgba(16,24,40,.18);--r:14px}
+@media (prefers-color-scheme:dark){:root{--bg:#0c0d10;--side:#111217;--card:#16171d;--fg:#ecedf1;--fg2:#c9cbd3;--mut:#9599a6;--line:#252731;--soft:#1c1e25;--soft2:#24262f;
+--acc:#8d86ff;--acc2:#a8a2ff;--acc-fg:#0c0d10;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--info:#60a5fa;--sh:0 1px 2px rgba(0,0,0,.35);--sh2:0 24px 64px rgba(0,0,0,.6)}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh}
+button{font:inherit;color:inherit}
+aside.side{background:var(--side);border-right:1px solid var(--line);padding:18px 14px;display:flex;flex-direction:column;gap:18px;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:10px;font-weight:680;font-size:15px;letter-spacing:-.01em;padding:0 4px}
+.logo{width:32px;height:32px;border-radius:10px;background:linear-gradient(135deg,var(--acc),#06b6d4);display:grid;place-items:center;color:#fff;box-shadow:0 4px 12px color-mix(in srgb,var(--acc) 35%,transparent)}
+.logo svg{width:17px;height:17px}
+.lbl{font-size:10.5px;font-weight:650;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 6px 6px}
+nav{display:flex;flex-direction:column;gap:2px}
+nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;border:0;border-radius:9px;padding:8px 10px;color:var(--fg2);font-weight:520;cursor:pointer;transition:background .12s}
+nav button:hover{background:var(--soft)}nav button[aria-selected=true]{background:color-mix(in srgb,var(--acc) 13%,transparent);color:var(--acc);font-weight:620}
+nav svg{width:18px;height:18px;flex:none;opacity:.85}nav .cnt{margin-left:auto;font-size:11px;font-weight:650;background:var(--bad);color:#fff;border-radius:999px;padding:0 7px}
+.sidefoot{margin-top:auto}
+.status-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;font-size:12.5px}
+.status-card .row{justify-content:space-between}
+.content{min-width:0}
+.topbar{display:flex;align-items:center;gap:16px;padding:20px 32px 6px;max-width:1320px;margin:0 auto;flex-wrap:wrap}
+.topbar h1{font-size:23px;font-weight:700;letter-spacing:-.025em;margin:0;flex:1;min-width:160px}
+.stats{display:flex;gap:8px;flex-wrap:wrap}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:6px 12px;display:flex;align-items:baseline;gap:7px;box-shadow:var(--sh);font-size:12.5px;color:var(--mut)}
+.stat b{font-size:17px;color:var(--fg);font-weight:680}.stat b.warn{color:var(--warn)}.stat b.run{color:var(--info)}
+main{max-width:1320px;margin:0 auto;padding:14px 32px 48px}
+h2{font-size:15px;font-weight:650;margin:0 0 12px;letter-spacing:-.01em}
+h3{font-size:11px;margin:20px 0 8px;color:var(--mut);font-weight:650;text-transform:uppercase;letter-spacing:.07em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;margin-bottom:16px;min-width:0;box-shadow:var(--sh)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.grow{flex:1}.mut{color:var(--mut);font-size:12.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:14px;margin-bottom:16px}.grid .card{margin:0}
+.kpi .mut{font-weight:550}.kpi .big{font-size:28px;font-weight:700;letter-spacing:-.03em;margin:4px 0 2px}
+select,textarea,input{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:8px 11px;font:inherit;max-width:100%;outline:none;transition:border-color .15s,box-shadow .15s}
+select:focus,textarea:focus,input:focus{border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 20%,transparent)}
+aside.side select{width:100%;font-weight:600}
+textarea{width:100%;resize:vertical;line-height:1.5}
+input[type=checkbox]{accent-color:var(--acc);width:16px;height:16px;padding:0;margin:0}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:7px 13px;font-weight:580;cursor:pointer;transition:background .12s,transform .05s,filter .12s;white-space:nowrap}
+.btn:hover{background:var(--soft)}.btn:active{transform:translateY(1px)}.btn svg{width:15px;height:15px}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:var(--acc-fg)}.btn.pri:hover{filter:brightness(1.08)}
+.btn.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 30%,var(--line))}.btn.ghost{border-color:transparent;background:none}
+.btn.sm{padding:4px 9px;font-size:12.5px;border-radius:8px}.btn:disabled{opacity:.5;cursor:default}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--soft);color:var(--fg2);border-radius:999px;padding:2px 9px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.dot{background:color-mix(in srgb,currentColor 12%,transparent)}.dot::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.c-run{color:var(--info)}.c-run::before{animation:pulse 1.3s infinite}.c-bad{color:var(--bad)}.c-warn{color:var(--warn)}.c-ok{color:var(--ok)}.c-mut{color:var(--mut)}
+@keyframes pulse{50%{opacity:.2}}
+.err{color:var(--bad)}.ok{color:var(--ok)}.warn{color:var(--warn)}
+table{border-collapse:separate;border-spacing:0;width:100%;font-size:13px}th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:11.5px;background:var(--soft)}tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:11px}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:12px 14px;font:12.3px/1.6 ui-monospace,"SF Mono",Menlo,monospace;max-height:460px;overflow:auto;margin:0}
+code{font:12.3px ui-monospace,"SF Mono",Menlo,monospace;background:var(--soft2);padding:1px 5px;border-radius:5px}
+.empty{text-align:center;color:var(--mut);padding:28px 10px;font-size:13px}
+.steps{display:flex;flex-wrap:wrap;align-items:center;gap:6px 0;margin:12px 0}
+.steps span{font-size:11px;font-weight:650;padding:3px 9px;border-radius:999px;background:var(--soft2);color:var(--mut);position:relative;letter-spacing:.01em}
+.steps span+span{margin-left:16px}.steps span+span::before{content:"";position:absolute;left:-15px;top:50%;width:14px;height:2px;background:var(--line)}
+.steps span.done{background:color-mix(in srgb,var(--ok) 13%,transparent);color:var(--ok)}.steps span.done+span::before{background:var(--ok)}
+.steps span.cur{background:var(--acc);color:var(--acc-fg);box-shadow:0 0 0 4px color-mix(in srgb,var(--acc) 18%,transparent)}
+.bar{height:5px;border-radius:9px;background:var(--soft2);overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:9px}
+.chat{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;align-items:start}
+.convs{padding:10px;position:sticky;top:12px;max-height:calc(100vh - 110px);overflow:auto}
+.conv{display:block;width:100%;text-align:left;border:0;background:none;border-radius:11px;padding:10px 11px;cursor:pointer;margin-bottom:2px}
+.conv:hover{background:var(--soft)}.conv.sel{background:color-mix(in srgb,var(--acc) 11%,transparent)}
+.conv .t{font-weight:600;font-size:13px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:3px 0}
+.thread{display:flex;flex-direction:column;gap:14px;padding:22px}
+.msg{display:flex;gap:11px;max-width:820px}.msg.me{align-self:flex-end;flex-direction:row-reverse}
+.av{width:32px;height:32px;border-radius:50%;flex:none;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;background:#64748b}
+.av.lead{background:linear-gradient(135deg,var(--acc),#06b6d4)}.av.sys{background:var(--soft2);color:var(--mut)}.av.me{background:#0f766e;font-size:10.5px}
+.av.analyst{background:#a855f7}.av.designer{background:#ec4899}.av.developer{background:#2563eb}.av.tester{background:#059669}.av.verifier{background:#d97706}
+.bub{background:var(--soft);border:1px solid var(--line);border-radius:4px 16px 16px 16px;padding:11px 14px;min-width:0}
+.me .bub{background:var(--acc);color:var(--acc-fg);border-color:transparent;border-radius:16px 4px 16px 16px}
+.bub.q{background:color-mix(in srgb,var(--warn) 10%,var(--card));border-color:color-mix(in srgb,var(--warn) 35%,var(--line))}
+.bub .who{font-size:11.5px;font-weight:650;color:var(--mut);margin-bottom:3px}.me .bub .who{color:color-mix(in srgb,var(--acc-fg) 75%,transparent)}
+.composer{border-top:1px solid var(--line);padding:16px 22px;display:flex;flex-direction:column;gap:10px}
+.composer textarea{min-height:92px;font-size:14.5px;border-radius:12px;padding:12px 14px}
+.hero{padding:34px 26px 10px;text-align:center}.hero h2{font-size:21px;margin-bottom:6px}.hero .mut{max-width:560px;margin:0 auto}
+.sugg{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:14px}
+.sugg button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:6px 12px;font-size:12.5px;cursor:pointer;color:var(--fg2)}.sugg button:hover{border-color:var(--acc);color:var(--acc)}
+.md h4{font-size:13.5px;margin:12px 0 4px}.md h4:first-child{margin-top:0}.md p{margin:4px 0}.md ul{margin:4px 0;padding-left:20px}.md li{margin:2px 0}.md li.ck{list-style:none;margin-left:-18px}.md pre{margin:6px 0}
+.board{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:14px;overflow-x:auto;padding-bottom:6px}
+.col{background:var(--soft);border-radius:14px;padding:10px;min-height:120px}
+.col h4{margin:2px 4px 10px;font-size:12.5px;display:flex;align-items:center;gap:7px}.col h4 .n{margin-left:auto}
+.tcard{display:block;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 12px;margin-bottom:8px;cursor:pointer;box-shadow:var(--sh);transition:transform .1s,border-color .1s}
+.tcard:hover{border-color:color-mix(in srgb,var(--acc) 45%,var(--line));transform:translateY(-1px)}
+.tcard .t{font-weight:600;font-size:13px;margin:4px 0 8px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.tcard .m{font-size:12px;color:var(--mut);margin-top:6px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.id{font-size:11.5px;font-weight:650;color:var(--mut);font-variant-numeric:tabular-nums}
+.scrim{position:fixed;inset:0;background:rgba(10,12,18,.35);backdrop-filter:blur(2px);z-index:20;display:none}
+.drawer{position:fixed;top:0;right:0;height:100vh;width:min(760px,100%);background:var(--bg);border-left:1px solid var(--line);box-shadow:var(--sh2);z-index:21;transform:translateX(102%);transition:transform .22s ease;overflow:auto;visibility:hidden}
+.drawer.open{transform:none;visibility:visible}.scrim.open{display:block}
+.dhead{position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);padding:16px 22px 0;border-bottom:1px solid var(--line);z-index:2}
+.dhead h2{margin:8px 0 0;font-size:17px}.dbody{padding:16px 22px 40px}
+.tabs{display:flex;gap:4px;margin-top:6px;overflow-x:auto}
+.tabs button{border:0;background:none;padding:8px 11px;cursor:pointer;color:var(--mut);font-weight:580;border-bottom:2px solid transparent;white-space:nowrap}
+.tabs button.on{color:var(--fg);border-bottom-color:var(--acc)}
+.tl{position:relative;padding-left:20px}.tl::before{content:"";position:absolute;left:6px;top:4px;bottom:4px;width:2px;background:var(--line)}
+.tl .it{position:relative;padding:5px 0 10px}.tl .it::before{content:"";position:absolute;left:-18px;top:10px;width:10px;height:10px;border-radius:50%;background:var(--card);border:2px solid currentColor}
+.tl .it>*{color:var(--fg)}.tl .it>.mut{color:var(--mut)}
+.agent{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:14px;align-items:start}
+.agent .av{width:42px;height:42px;font-size:14px}
+.gate{border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 7%,var(--card));border-radius:12px;padding:12px 14px;margin-bottom:10px}
+details{border-top:1px solid var(--line);padding:10px 0 2px}details summary{cursor:pointer;font-weight:580;list-style:none;display:flex;align-items:center;gap:8px;margin-bottom:8px}
+details summary::-webkit-details-marker{display:none}details summary::before{content:"›";color:var(--mut);transition:transform .15s;display:inline-block}details[open] summary::before{transform:rotate(90deg)}
+#toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);max-width:min(460px,calc(100% - 40px));background:var(--fg);color:var(--bg);padding:11px 18px;border-radius:12px;display:none;box-shadow:var(--sh2);font-weight:550;z-index:40}
+@media (max-width:980px){.chat{grid-template-columns:1fr}.convs{position:static;max-height:260px}.board{grid-template-columns:repeat(4,minmax(240px,1fr))}}
+@media (max-width:820px){body{grid-template-columns:1fr}aside.side{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 16px;gap:10px}
+nav{flex-direction:row;overflow-x:auto}nav button{width:auto;white-space:nowrap}.sidefoot{margin:0}.lbl{display:none}
+.topbar{padding:14px 16px 0}main{padding:12px 16px 32px}.thread,.composer{padding:14px}}
+</style>
+</head>
+<body>
+<aside class="side">
+  <div class="brand"><span class="logo" id="logo"></span>AI Orchestra</div>
+  <div><div class="lbl">Proje</div><select id="proj" aria-label="Proje"></select></div>
+  <div><div class="lbl">Çalışma alanı</div><nav id="tabs"></nav></div>
+  <div class="sidefoot"><div class="status-card" id="sys"></div></div>
+</aside>
+<div class="content">
+  <div class="topbar"><h1 id="ttl"></h1><div class="stats" id="stats"></div></div>
+  <main id="view"></main>
+</div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Görev ayrıntısı"></aside>
+<div id="toast" role="status"></div>
+<script>
+const TOKEN='__TOKEN__';
+const TABS=[['lead','Lead ile çalış'],['tasks','Görev panosu'],['agents','Ajanlar'],['activity','Etkinlik'],['tokens','Token'],['skills','Skills'],['projects','Projeler'],['settings','Ayarlar']];
+const ICONS={lead:'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',tasks:'M4 4h6v16H4zM14 4h6v10h-6z',agents:'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
+  activity:'M3 12h4l3-8 4 16 3-8h4',tokens:'M4 20V10M10 20V4M16 20v-7M22 20H2',skills:'M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.4 6.8 19.1l1-5.8L3.5 9.2l5.9-.9z',
+  projects:'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',settings:'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M14 4v4M8 10v4M16 16v4',
+  send:'M4 12l16-8-6 16-2.5-6.5z',x:'M6 6l12 12M18 6 6 18',plus:'M12 5v14M5 12h14',play:'M7 5l12 7-12 7z',stop:'M6 6h12v12H6z',
+  logo:'M12 7.2v4.3M10.6 12.6 6.6 16M13.4 12.6l4 3.4M12 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM5 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM19 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'};
+const ROLE={lead:'L',analyst:'A',designer:'D',developer:'Dv',tester:'T',verifier:'V'};
+const ROLE_TR={lead:'Lead',analyst:'Analist',designer:'Tasarımcı',developer:'Developer',tester:'Tester',verifier:'Verifier'};
+const draft={};
+let tab=(location.hash.slice(1)||'lead'),project=null,openTask=null,chatSel=null,dtab='overview',timer=null,TASKS=[],drawerBusy=false;
+try{project=localStorage.getItem('proj')}catch(e){}
+if(!TABS.find(x=>x[0]===tab))tab='lead';
+
+function h(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==='on')for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(v!==false&&v!=null)e.setAttribute(k,v===true?'':v)}
+  for(const k of kids.flat(9)){if(k==null||k===false)continue;e.append(k instanceof Node?k:document.createTextNode(String(k)))}return e}
+function icon(k,w){const s=document.createElementNS('http://www.w3.org/2000/svg','svg');for(const[a,v]of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':w||1.8,'stroke-linecap':'round','stroke-linejoin':'round'}))s.setAttribute(a,v);
+  const p=document.createElementNS('http://www.w3.org/2000/svg','path');p.setAttribute('d',ICONS[k]||'');s.append(p);return s}
+document.getElementById('logo').append(icon('logo',2.2));
+async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Orchestra-Token':TOKEN,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({error:'yanıt okunamadı'}));if(!r.ok)throw new Error(j.error||r.status);return j}
+function toast(t,bad){const e=document.getElementById('toast');e.textContent=t;e.style.background=bad?'var(--bad)':'';e.style.display='block';clearTimeout(e._t);e._t=setTimeout(()=>e.style.display='none',4500)}
+const P=()=>'project='+encodeURIComponent(project);
+const fmt=t=>t?new Date(t).toLocaleString('tr-TR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}):'-';
+const ago=t=>{if(!t)return'';const s=(Date.now()-new Date(t))/1000;return s<60?'az önce':s<3600?Math.round(s/60)+' dk önce':s<86400?Math.round(s/3600)+' sa önce':Math.round(s/86400)+' gün önce'};
+const dur=s=>s==null?'-':s<60?Math.round(s)+' sn':s<3600?Math.round(s/60)+' dk':(s/3600).toFixed(1)+' sa';
+const num=n=>(n||0).toLocaleString('tr-TR');
+const kfmt=n=>n>=1e6?(n/1e6).toFixed(1)+' M':n>=1e3?Math.round(n/1e3)+' B':String(n||0);
+const CLOSED=['DONE','CLOSED','ABANDONED'];
+function tone(t){const st=t.status;if(CLOSED.includes(t.stage))return t.stage==='DONE'?'c-ok':'c-mut';if(st==='RUNNING')return'c-run';
+  if(['BLOCKED','STATE_ERROR'].includes(st))return'c-bad';if(['AWAITING_USER','WAITING_LIMIT','WAITING_ENV'].includes(st)||(t.gates||[]).length)return'c-warn';return'c-mut'}
+const LABEL={RUNNING:'Çalışıyor',BLOCKED:'Durdu',AWAITING_USER:'Onay bekliyor',WAITING_LIMIT:'Limit bekliyor',WAITING_DEP:'Bağımlılık bekliyor',WAITING_ENV:'Ortam bekliyor',WAITING_FOR_LEAD:'Lead sırada',IDLE:'Sırada',COMPLETED:'Tamamlandı',
+  DISABLED:'Otomasyon kapalı',MANUAL:'Elle',CLOSED:'Kapatıldı',ABANDONED:'Bırakıldı',STATE_ERROR:'State hatası'};
+function pill(t){const q=(t.message||'').startsWith('Lead sorusu');return h('span',{class:'chip dot '+(q?'c-warn':tone(t))},q?'Yanıt bekliyor':t.stage==='DONE'?'Bitti':(LABEL[t.status]||t.status||'-'))}
+function steps(path,stage){const ci=(path||[]).indexOf(stage);return h('div',{class:'steps'},(path||[]).map((s,i)=>h('span',{class:s===stage?(stage==='DONE'?'done':'cur'):i<ci?'done':''},s.replace('_',' '))))}
+function progress(t){const p=t.path||[];const i=Math.max(0,p.indexOf(t.stage));return p.length>1?Math.round(100*i/(p.length-1)):0}
+function avatar(role){return h('span',{class:'av '+(role||'sys')},ROLE[role]||'·')}
+function needsMe(t){return !CLOSED.includes(t.stage)&&(['BLOCKED','AWAITING_USER','STATE_ERROR'].includes(t.status)||(t.gates||[]).length>0)}
+
+/* Minimal markdown built with DOM nodes only; agent text is untrusted, never innerHTML. */
+function inline(s){const out=[];const re=/(`[^`]+`|\*\*[^*]+\*\*)/g;let i=0,m;while((m=re.exec(s))){out.push(s.slice(i,m.index));
+  out.push(m[0][0]==='`'?h('code',{},m[0].slice(1,-1)):h('b',{},m[0].slice(2,-2)));i=m.index+m[0].length}out.push(s.slice(i));return out}
+function md(text){const box=h('div',{class:'md'});let list=null,code=null;
+  for(const raw of String(text||'').split('\n')){const l=raw.replace(/\s+$/,'');
+    if(l.startsWith('```')){if(code){box.append(h('pre',{},code.join('\n')));code=null}else code=[];continue}
+    if(code){code.push(raw);continue}
+    if(/^<!--.*-->$/.test(l.trim()))continue;
+    const hm=l.match(/^#{1,4}\s+(.*)/);if(hm){list=null;box.append(h('h4',{},inline(hm[1])));continue}
+    const lm=l.match(/^\s*(?:[-*]|\d+\.)\s+(\[( |x|X)\]\s+)?(.*)/);if(lm){if(!list){list=h('ul');box.append(list)}
+      list.append(h('li',{class:lm[1]?'ck':''},lm[1]?(lm[2].trim()?'☑ ':'☐ '):'',inline(lm[3])));continue}
+    list=null;if(l.trim())box.append(h('p',{},inline(l)))}
+  if(code)box.append(h('pre',{},code.join('\n')));return box}
+function sections(text){const out={};let cur='_';for(const l of String(text||'').split('\n')){const m=l.match(/^##\s+(.*)/);if(m){cur=m[1].trim();out[cur]=[];continue}(out[cur]=out[cur]||[]).push(l)}
+  for(const k in out)out[k]=out[k].join('\n').trim();return out}
+function leadAnalysis(text){const keep=[];for(const[k,v]of Object.entries(sections(text))){if(k==='_'||/^Kullanıcı (isteği|yanıtı)|^Lead sorusu/.test(k))continue;
+  const body=v.split('\n').filter(x=>!/Lead doldurur|İsteğe bağlı: her satır|^<!--/.test(x.trim())).join('\n').trim();if(body)keep.push('#### '+k+'\n'+body)}return keep.join('\n\n')}
+
+/* chrome: nav, project picker, runner status, stats */
+function nav(){const need=TASKS.filter(needsMe).length;
+  document.getElementById('tabs').replaceChildren(...TABS.map(([k,l])=>h('button',{'aria-selected':k===tab,on:{click:()=>{tab=k;location.hash=k;render()}}},icon(k),l,k==='tasks'&&need?h('span',{class:'cnt'},need):null)));
+  document.getElementById('ttl').textContent=(TABS.find(x=>x[0]===tab)||['',''])[1]}
+async function chrome(){const j=await api('/api/projects');const sel=document.getElementById('proj');sel.replaceChildren();
+  const on=j.projects.filter(p=>p.onboarded);for(const p of on)sel.append(h('option',{value:p.name},p.name));
+  if(!on.find(p=>p.name===project))project=on[0]?on[0].name:null;sel.value=project||'';
+  const cur=on.find(p=>p.name===project);
+  TASKS=project?(await api('/api/tasks?'+P())).tasks:[];
+  document.getElementById('sys').replaceChildren(...[
+    h('div',{class:'row'},h('span',{class:'mut'},'Runner'),cur&&cur.runner?h('span',{class:'chip dot c-ok'},'online'):h('button',{class:'btn sm',on:{click:startRunner}},icon('play',2),'Başlat')),
+    h('div',{class:'row'},h('span',{class:'mut'},'Yeni görevler'),h('button',{class:'btn sm',on:{click:async()=>{await api(j.paused?'/api/resume':'/api/pause',{});toast(j.paused?'Devam ediyor':'Duraklatıldı (çalışan ajan sürer)');render()}}},j.paused?'Devam et':'Duraklat')),
+    j.paused?h('span',{class:'chip dot c-warn'},'Yeni rol başlamıyor'):null,
+    cur&&cur.git?h('div',{class:'mut'},'Dal: ',h('code',{},cur.git)):null].filter(Boolean));
+  const open=TASKS.filter(t=>!CLOSED.includes(t.stage)).length,run=TASKS.filter(t=>t.status==='RUNNING').length,wait=TASKS.filter(needsMe).length;
+  document.getElementById('stats').replaceChildren(
+    h('div',{class:'stat'},h('b',{class:run?'run':''},run),'çalışan ajan'),h('div',{class:'stat'},h('b',{class:wait?'warn':''},wait),'seni bekliyor'),
+    h('div',{class:'stat'},h('b',{},open),'açık'),h('div',{class:'stat'},h('b',{},TASKS.filter(t=>t.stage==='DONE').length),'biten'))}
+async function startRunner(){try{const r=await api('/api/runner',{project});toast('Runner '+r.runner);render()}catch(e){toast(e.message,true)}}
+document.getElementById('proj').addEventListener('change',e=>{project=e.target.value;try{localStorage.setItem('proj',project)}catch(_){}chatSel=null;closeDrawer();render()});
+
+const V={};
+/* Lead chat */
+V.lead=async(el)=>{const convs=TASKS.filter(t=>t.intake);
+  if(chatSel&&chatSel!=='new'&&!convs.find(t=>t.id===chatSel))chatSel=null;
+  if(!chatSel)chatSel=convs[0]?convs[0].id:'new';
+  const list=h('div',{class:'card convs'},h('div',{class:'row',style:'padding:4px 4px 10px'},h('b',{class:'grow'},'Konuşmalar'),
+      h('button',{class:'btn sm pri',on:{click:()=>{chatSel='new';render()}}},icon('plus',2.2),'Yeni')),
+    convs.length?convs.map(t=>h('button',{class:'conv'+(t.id===chatSel?' sel':''),on:{click:()=>{chatSel=t.id;render()}}},
+      h('div',{class:'row'},h('span',{class:'id'},t.id),h('span',{class:'grow'}),pill(t)),h('div',{class:'t'},t.title||''),h('div',{class:'mut'},ago(t.updated)))):h('div',{class:'empty'},'Henüz konuşma yok'));
+  const pane=h('div',{class:'card',style:'padding:0;overflow:hidden'},chatSel==='new'?newComposer():await thread(chatSel));
+  el.replaceChildren(h('div',{class:'chat'},list,pane))};
+function newComposer(){
+  const ta=h('textarea',{placeholder:'Ne yapılsın? Örn: "Oturum süresi dolunca kullanıcı login ekranına yönlendirilmiyor, düzelt."',rows:5});
+  ta.value=draft.new||'';ta.addEventListener('input',()=>{draft.new=ta.value});
+  const wt=h('input',{type:'checkbox',checked:true});
+  const send=h('button',{class:'btn pri',on:{click:async()=>{if(ta.value.trim().length<8)return toast('Biraz daha ayrıntı yaz',true);send.disabled=true;
+    try{const j=await api('/api/tasks',{project,text:ta.value,worktree:wt.checked});toast(j.id+' oluşturuldu · Lead analiz ediyor');draft.new='';chatSel=j.id;render()}catch(e){toast(e.message,true)}finally{send.disabled=false}}}},icon('send',2),'Lead\'e gönder');
+  ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))send.click()});
+  const ex=['Login ekranındaki hata mesajını düzelt','Ayarlar sayfasına çıkış butonu ekle','Profil servisindeki null hatasını bul ve düzelt'];
+  return h('div',{},h('div',{class:'hero'},h('div',{class:'logo',style:'width:48px;height:48px;border-radius:14px;margin:0 auto 14px'},icon('lead',2)),
+      h('h2',{},'Lead\'e görev ver'),h('div',{class:'mut'},(project||'')+' projesinde ne yapılacağını doğal dille yaz. Lead kodu inceler, kapsamı ve kabul kriterlerini çıkarır; gerekirse sana soru sorar.'),
+      h('div',{class:'sugg'},ex.map(x=>h('button',{on:{click:()=>{ta.value=x;ta.focus()}}},x)))),
+    h('div',{class:'composer'},ta,h('div',{class:'row'},h('label',{class:'row mut',style:'gap:7px'},wt,'İzole worktree (ai/<ID> dalı · ana dalına dokunmaz)'),h('span',{class:'grow'}),h('span',{class:'mut'},'⌘↵'),send)))}
+async function thread(id){
+  const d=await api('/api/task?'+P()+'&id='+encodeURIComponent(id));const s=d.state,a=s.automation||{};const t=TASKS.find(x=>x.id===id)||{};
+  const me=(txt,at)=>h('div',{class:'msg me'},h('span',{class:'av me'},'Sen'),h('div',{class:'bub'},h('div',{class:'who'},'Sen · '+fmt(at)),h('div',{style:'white-space:pre-wrap'},txt)));
+  const bot=(role,who,kids,q)=>h('div',{class:'msg'},avatar(role),h('div',{class:'bub'+(q?' q':'')},h('div',{class:'who'},who),kids));
+  const it=s.intake||{},c=s.classification,msgs=[me(it.text||s.title,it.created||s.created)];
+  msgs.push(bot(null,'Sistem · kural tabanlı sınıflandırma',[h('div',{class:'row'},h('span',{class:'chip'},'profil '+s.profile),c?h('span',{class:'chip'},c.level):null,s.worktree?h('span',{class:'chip'},'dal '+s.worktree.branch):null),
+    c?h('div',{class:'mut',style:'margin-top:6px'},String(c.reason||'').replace(/^#+\s*/,'')):null,(s.skills||[]).length?h('div',{class:'mut',style:'margin-top:6px'},'Önerilen skill: '+s.skills.map(k=>k.name).join(', ')):null]));
+  const analysis=leadAnalysis(d.docs.TASK);
+  if(analysis)msgs.push(bot('lead','Lead · görev analizi',md(analysis)));
+  else if(s.stage==='NEW')msgs.push(bot('lead','Lead',h('div',{class:'mut'},a.status==='RUNNING'?'Kodu inceliyor ve kapsamı çıkarıyor…':'Sırada; runner Lead\'i başlatacak.')));
+  for(const r of it.replies||[])msgs.push(me(r.text,r.at));
+  if(d.question)msgs.push(bot('lead','Lead · soru',md(d.question),true));
+  if(s.stage!=='NEW')msgs.push(bot(a.status==='RUNNING'?a.role:null,'İlerleme',[steps(s.stage_path,s.stage),
+    h('div',{class:'row'},pill(t),a.role&&a.status==='RUNNING'?h('span',{class:'chip'},(ROLE_TR[a.role]||a.role)+' çalışıyor'):null,s.rework_count?h('span',{class:'chip dot c-warn'},'rework '+s.rework_count):null),
+    a.message?h('div',{class:'mut',style:'margin-top:6px'},a.message):null,
+    a.status==='RUNNING'&&d.log?h('pre',{style:'margin-top:10px;max-height:150px'},d.log.lines.slice(-6).join('\n')):null]));
+  if(s.stage==='DONE')msgs.push(bot('lead','Lead · sonuç',[h('b',{},t.label||a.message||'Tamamlandı'),
+    d.docs.FINAL_REPORT?h('details',{},h('summary',{},'Final rapor'),md(d.docs.FINAL_REPORT)):null,
+    d.commit_hint?h('div',{class:'mut',style:'margin-top:8px'},'Commit (önce dry-run, push/merge yok): ',h('code',{},'team commit '+id)):null]));
+  const head=h('div',{class:'row',style:'padding:14px 22px;border-bottom:1px solid var(--line)'},h('span',{class:'id'},id),h('b',{class:'grow',style:'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'},s.title),
+    h('button',{class:'btn sm',on:{click:()=>openDrawer(id)}},'Ayrıntılar'));
+  const out=[head,h('div',{class:'thread'},msgs)];
+  if(CLOSED.includes(s.stage)){out.push(h('div',{class:'composer'},h('div',{class:'row'},h('span',{class:'mut grow'},'Görev kapandı. Devamı için yeni görev aç; bu görev referans olarak eklenir.'),
+    h('button',{class:'btn pri',on:{click:()=>{draft.new=id+' görevinin devamı: ';chatSel='new';render()}}},icon('plus',2.2),'Takip görevi'))));return out}
+  const running=a.status==='RUNNING',ta=h('textarea',{rows:3,placeholder:d.question?'Lead\'in sorusunu yanıtla…':'Lead\'e mesaj yaz…'});
+  ta.value=draft[id]||'';ta.addEventListener('input',()=>{draft[id]=ta.value});
+  const b=h('button',{class:'btn pri',on:{click:async()=>{if(!ta.value.trim())return;b.disabled=true;try{await api('/api/reply',{project,id,text:ta.value});draft[id]='';
+    toast(running?'Mesaj eklendi; sıradaki rol ve Lead okuyacak':'İletildi; görev sürecek');render()}catch(e){toast(e.message,true)}finally{b.disabled=false}}}},icon('send',2),'Gönder');
+  ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey))b.click()});
+  const hint=d.question?'Yanıtın TASK.md\'ye eklenir; görev kaldığı yerden sürer.':running?(ROLE_TR[a.role]||'Rol')+' şu an çalışıyor ve mesajı bu turda görmez; sıradaki rol ve Lead okur. Hemen durdurmak için Ayrıntılar → Rolü iptal et.':a.status==='BLOCKED'?'Yanıtın önce Lead\'e gider: Lead kararı yazar, rol kaldığı yerden devam eder.':'Mesajın TASK.md\'ye ve Lead kutusuna eklenir; sıradaki rol ve Lead okur.';
+  out.push(h('div',{class:'composer'},ta,h('div',{class:'row'},h('span',{class:'mut grow'},hint+' Human gate onayı yerine geçmez.'),b)));
+  return out}
+
+/* Kanban */
+V.tasks=async(el)=>{const cols=[['Çalışıyor','c-run',t=>t.status==='RUNNING'],['Seni bekliyor','c-warn',needsMe],
+    ['Sırada','c-mut',t=>!CLOSED.includes(t.stage)&&t.status!=='RUNNING'&&!needsMe(t)],['Biten','c-ok',t=>CLOSED.includes(t.stage)]];
+  el.replaceChildren(TASKS.length?h('div',{class:'board'},cols.map(([name,cls,f])=>{const all=TASKS.filter(f),rows=all.slice(0,name==='Biten'?12:99);
+    return h('div',{class:'col'},h('h4',{},h('span',{class:'chip dot '+cls,style:'padding:2px 4px'}),name,h('span',{class:'chip n'},all.length)),rows.length?rows.map(tcard):h('div',{class:'empty'},'—'))})):
+    h('div',{class:'card empty'},'Bu projede görev yok. "Lead ile çalış" ekranından ilk görevi ver.'))};
+function tcard(t){return h('button',{class:'tcard',on:{click:()=>openDrawer(t.id)}},h('div',{class:'row'},h('span',{class:'id'},t.id),h('span',{class:'grow'}),pill(t)),
+  h('div',{class:'t'},t.title||''),!CLOSED.includes(t.stage)&&t.path?h('div',{class:'bar'},h('i',{style:'width:'+progress(t)+'%'})):null,
+  h('div',{class:'row',style:'margin-top:8px'},h('span',{class:'chip'},t.profile||'-'),h('span',{class:'chip'},t.stage),t.role&&t.status==='RUNNING'?h('span',{class:'chip'},ROLE_TR[t.role]||t.role):null,
+    t.rework?h('span',{class:'chip dot c-warn'},'rework '+t.rework):null,t.worktree?h('span',{class:'chip'},'worktree'):null),
+  t.message?h('div',{class:'m'},t.message):null)}
+
+/* Task drawer */
+function closeDrawer(){openTask=null;document.getElementById('drawer').classList.remove('open');document.getElementById('scrim').classList.remove('open')}
+document.getElementById('scrim').addEventListener('click',closeDrawer);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+async function openDrawer(id){if(openTask!==id){dtab='overview';document.getElementById('drawer').scrollTop=0}openTask=id;document.getElementById('drawer').classList.add('open');document.getElementById('scrim').classList.add('open');await renderDrawer()}
+async function renderDrawer(){if(!openTask||drawerBusy)return;drawerBusy=true;const dr=document.getElementById('drawer'),id=openTask;
+  try{const d=await api('/api/task?'+P()+'&id='+encodeURIComponent(id));if(openTask!==id)return;const s=d.state,a=s.automation||{};const t=TASKS.find(x=>x.id===id)||{status:a.status,stage:s.stage};
+    const act=h('div',{class:'row'});
+    if(a.status==='RUNNING')act.append(h('button',{class:'btn sm bad',on:{click:async()=>{if(!confirm(id+': çalışan '+(ROLE_TR[a.role]||'rol')+' iptal edilsin mi? Görev BLOCKED olur.'))return;
+      try{await api('/api/cancel',{project,id,confirm:'IPTAL'});toast('İptal istendi')}catch(e){toast(e.message,true)}}}},icon('stop',2),'Rolü iptal et'));
+    if(['BLOCKED','DISABLED','AWAITING_USER'].includes(a.status)&&!(s.gates||[]).some(g=>g.status!=='RESOLVED_BY_LEAD'))act.append(h('button',{class:'btn sm',on:{click:async()=>{try{await api('/api/automate',{project,id,action:'resume'});toast('Devam ediyor');render()}catch(e){toast(e.message,true)}}}},icon('play',2),'Devam et'));
+    if(a.enabled&&!CLOSED.includes(s.stage))act.append(h('button',{class:'btn sm ghost',on:{click:async()=>{try{await api('/api/automate',{project,id,action:'disable'});toast('Otomasyon durduruldu');render()}catch(e){toast(e.message,true)}}}},'Otomasyonu durdur'));
+    act.append(h('button',{class:'btn sm ghost',on:{click:closeDrawer},'aria-label':'Kapat'},icon('x',2)));
+    const head=h('div',{class:'dhead'},h('div',{class:'row'},h('span',{class:'id'},id),pill(t),h('span',{class:'grow'}),act),h('h2',{},s.title),steps(s.stage_path,s.stage),
+      h('div',{class:'tabs'},[['overview','Genel'],['docs','Belgeler'],['timeline','Zaman çizelgesi'],['log','Günlük'],['context','Context']].map(([k,l])=>h('button',{class:dtab===k?'on':'',on:{click:()=>{dtab=k;renderDrawer()}}},l))));
+    const body=h('div',{class:'dbody'});
+    if(dtab==='overview'){
+      body.append(h('div',{class:'row'},h('span',{class:'chip'},'profil '+s.profile),s.classification?h('span',{class:'chip'},s.classification.level):null,s.worktree?h('span',{class:'chip'},'dal '+s.worktree.branch):null,
+        s.rework_count?h('span',{class:'chip dot c-warn'},'rework '+s.rework_count):null,s.escalated?h('span',{class:'chip dot c-warn'},'yükseltildi: '+(s.escalated.reason||'')):null),
+        a.message?h('div',{class:a.status==='BLOCKED'?'err':'mut',style:'margin-top:10px'},a.message):null);
+      const gates=(s.gates||[]).filter(g=>g.status!=='RESOLVED_BY_LEAD');
+      if(gates.length){body.append(h('h3',{},'İnsan onayı bekleyen kapılar'));for(const g of gates){
+        const sel=h('select',{},(g.kind==='DB'?['user-applied','cancelled']:['explicitly-approved','user-applied','cancelled']).map(o=>h('option',{value:o},o)));
+        body.append(h('div',{class:'gate'},h('div',{},h('b',{},g.kind),' · ',g.action),h('div',{class:'mut'},g.target+' · '+g.environment),
+          h('div',{class:'mut',style:'margin:4px 0 8px'},g.kind==='DB'?'DB işlemini ajan çalıştırmaz: sen uygula ya da iptal et.':'Onay yalnız bu işlem ve hedef için geçerlidir.'),
+          h('div',{class:'row'},sel,h('button',{class:'btn sm',on:{click:async()=>{if(!confirm(g.kind+' kapısı "'+sel.value+'" olarak kapatılsın mı?'))return;
+            try{await api('/api/gate',{project,id,gate_id:g.id,outcome:sel.value,confirm:'ONAY'});toast('Kapı kaydedildi');render()}catch(e){toast(e.message,true)}}}},'Kararı kaydet'))))}}
+      const ev=(name,x)=>x?h('span',{class:'chip dot '+(x.result==='PASS'?'c-ok':'c-bad')},name+' '+x.result+(x.engine_id?' · '+x.engine_id:'')):h('span',{class:'chip'},name+' bekleniyor');
+      body.append(h('h3',{},'Kanıt'),h('div',{class:'row'},ev('Tester',s.claude_test),(s.stage_path||[]).includes('VERIFY_CODEX')?ev('Verifier',s.codex_verify):h('span',{class:'chip'},'Verifier yok (micro)')));
+      if((s.skills||[]).length)body.append(h('h3',{},'Önerilen skill\'ler'),h('div',{},s.skills.map(k=>h('div',{style:'margin:4px 0'},h('b',{},k.name),h('span',{class:'mut'},' — '+(k.why||'')+(k.installed?' · zaten yüklü':''))))));
+      if(d.commit_hint)body.append(h('h3',{},'Commit'),h('div',{class:'mut',style:'margin-bottom:6px'},'Önce dry-run gösterir; --apply yalnız görev dalına commit eder. Push/merge yok.'),h('pre',{},d.commit_hint));
+      if(d.messages.length)body.append(h('h3',{},'Mesajlar'),h('div',{class:'tl'},d.messages.slice(-12).reverse().map(m=>h('div',{class:'it c-mut'},h('div',{class:'mut'},fmt(m.created)+' · '+m.from+' → '+m.to),h('div',{style:'white-space:pre-wrap'},m.body)))));
+    }else if(dtab==='docs'){const keys=Object.keys(d.docs);body.append(keys.length?keys.map(k=>h('details',{open:k==='TASK'},h('summary',{},k+'.md'),md(d.docs[k]))):h('div',{class:'empty'},'Belge yok'))}
+    else if(dtab==='timeline'){body.append(d.runs.length?h('div',{class:'tl'},d.runs.slice().reverse().map(r=>{const c=r.result==='advanced'?'c-ok':['crash','blocked','cancelled','timeout'].includes(r.result)?'c-bad':r.result==='limit'?'c-warn':'c-mut';
+        return h('div',{class:'it '+c},h('div',{class:'row'},h('b',{},ROLE_TR[r.role]||r.role),h('span',{class:'chip'},r.model||r.engine||'-'),h('span',{class:'chip dot '+c},r.result||'-'),h('span',{class:'grow'}),h('span',{class:'mut'},fmt(r.start))),
+          h('div',{class:'mut'},dur(r.seconds)+' · '+kfmt(r.tokens)+' token'+(r.usd?' · $'+r.usd.toFixed(2)+' API eşd.':'')))})):h('div',{class:'empty'},'Henüz rol çalışmadı'))}
+    else if(dtab==='log'){body.append(d.log?h('div',{},h('div',{class:'mut',style:'margin-bottom:8px'},d.log.file+' · sırlar maskelenir'),h('pre',{style:'max-height:none'},d.log.lines.join('\n')||'(boş)')):h('div',{class:'empty'},'Günlük yok'))}
+    else{body.append(d.shadow.length?h('div',{},h('div',{class:'mut',style:'margin-bottom:10px'},'Shadow Mode: önerilen bağlam paketi yalnız kaydedilir, gerçek istem değişmez.'),
+      h('div',{class:'tbl'},h('table',{},h('tr',{},h('th',{},'Rol'),h('th',{class:'n'},'Mevcut ~token'),h('th',{class:'n'},'Önerilen'),h('th',{},'İlgili dosyalar / notlar')),
+        d.shadow.map(r=>h('tr',{},h('td',{},ROLE_TR[r.role]||r.role),h('td',{class:'n'},num(r.original_tokens_est)),h('td',{class:'n'},num(r.proposed_tokens_est)),
+          h('td',{class:'mut'},[...((r.proposed||{}).relevant_files||[]).slice(0,4),...(r.notes||[])].join(' · '))))))):h('div',{class:'empty'},'Shadow kaydı yok'))}
+    const st=dr.scrollTop,opened=new Map([...dr.querySelectorAll('details')].map(x=>[x.querySelector('summary').textContent,x.open]));
+    dr.replaceChildren(head,body);for(const x of dr.querySelectorAll('details')){const k=x.querySelector('summary').textContent;if(opened.has(k))x.open=opened.get(k)}dr.scrollTop=st;
+  }catch(e){dr.replaceChildren(h('div',{class:'dbody err'},'Hata: '+e.message))}finally{drawerBusy=false}}
+
+/* Live agents */
+V.agents=async(el)=>{const run=TASKS.filter(t=>t.status==='RUNNING');
+  const cards=await Promise.all(run.map(async t=>{let lines=[];try{const d=await api('/api/task?'+P()+'&id='+encodeURIComponent(t.id));lines=d.log?d.log.lines.slice(-7):[]}catch(e){}
+    return h('div',{class:'card agent'},avatar(t.role),h('div',{style:'min-width:0'},h('div',{class:'row'},h('b',{},ROLE_TR[t.role]||t.role),h('span',{class:'chip dot c-run'},'çalışıyor'),h('span',{class:'mut'},'son güncelleme '+ago(t.updated))),
+      h('div',{style:'margin:4px 0 8px'},h('span',{class:'id'},t.id+' · '),t.title),h('pre',{style:'max-height:170px'},lines.join('\n')||'…')),
+      h('button',{class:'btn sm',on:{click:()=>openDrawer(t.id)}},'Görev'))}));
+  const wait=TASKS.filter(needsMe);
+  el.replaceChildren(cards.length?h('div',{},cards):h('div',{class:'card empty'},'Şu an çalışan ajan yok.'),
+    h('h3',{},'Seni bekleyenler'),wait.length?h('div',{class:'grid',style:'grid-template-columns:repeat(auto-fill,minmax(260px,1fr))'},wait.map(tcard)):h('div',{class:'card empty'},'Bekleyen yok.'))};
+
+/* Activity */
+V.activity=async(el)=>{const j=await api('/api/activity?'+P());const q=h('input',{placeholder:'Günlükte süz…',style:'min-width:240px'});const pre=h('pre',{style:'max-height:560px'});
+  const draw=()=>{const f=q.value.toLowerCase();pre.textContent=j.runner_log.filter(l=>!f||l.toLowerCase().includes(f)).join('\n')||'(günlük yok — runner Command Center\'dan başlatılınca yazılır)';pre.scrollTop=pre.scrollHeight};q.addEventListener('input',draw);draw();
+  el.replaceChildren(h('div',{class:'card'},h('div',{class:'row',style:'margin-bottom:12px'},h('h2',{class:'grow',style:'margin:0'},'Runner günlüğü'),q),pre,h('div',{class:'mut',style:'margin-top:8px'},'Son 300 satır · sırlar maskelenir')),
+    h('div',{class:'card'},h('h2',{},'Girişler ve kullanıcı müdahaleleri'),j.events.length?h('div',{class:'tl'},j.events.slice().reverse().map(e=>h('div',{class:'it '+(e.type==='intake'?'c-run':'c-warn')},
+      h('div',{class:'row'},h('b',{},e.type==='intake'?'Yeni görev':e.cmd),h('span',{class:'id'},e.task||''),h('span',{class:'grow'}),h('span',{class:'mut'},fmt(e.ts))),
+      h('div',{class:'mut'},e.type==='intake'?`${e.profile} · ${e.level}${e.worktree?' · worktree':''}`:(e.detail||''))))):h('div',{class:'empty'},'Kayıt yok')))};
+
+/* Tokens */
+function dailyChart(daily){const e=Object.entries(daily||{});if(!e.length)return h('div',{class:'empty'},'Veri yok');const W=760,H=150,mx=Math.max(1,...e.map(x=>x[1].tokens)),step=(W-40)/e.length,bw=Math.max(6,Math.min(36,step-6));
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),el=(t,a)=>{const n=document.createElementNS(ns,t);for(const[k,v]of Object.entries(a))n.setAttribute(k,v);return n};
+  svg.setAttribute('viewBox',`0 0 ${W} ${H+24}`);svg.style.width='100%';svg.style.height='auto';svg.style.maxHeight='220px';svg.setAttribute('role','img');svg.setAttribute('aria-label','Günlük token kullanımı');
+  e.forEach(([d,v],i)=>{const x=20+i*step+(step-bw)/2,hh=Math.max(2,(H-10)*v.tokens/mx);const r=el('rect',{x,y:H-hh,width:bw,height:hh,rx:4,fill:'var(--acc)'});
+    const tt=document.createElementNS(ns,'title');tt.textContent=`${d}: ${num(v.tokens)} token · ${v.runs} çalışma · $${(v.api_eq_usd||0).toFixed(2)}`;r.append(tt);svg.append(r);
+    if(e.length<=14||i%Math.ceil(e.length/10)===0){const t=el('text',{x:x+bw/2,y:H+16,'text-anchor':'middle','font-size':10,fill:'var(--mut)'});t.textContent=d.slice(5);svg.append(t)}});return svg}
+V.tokens=async(el)=>{const j=await api('/api/tokens?'+P());const T=j.totals;
+  const kpi=(l,v,sub,cls)=>h('div',{class:'card kpi'},h('div',{class:'mut'},l),h('div',{class:'big '+(cls||'')},v),h('div',{class:'mut'},sub||' '));
+  const tbl=(cols,rows)=>h('div',{class:'tbl'},h('table',{},h('tr',{},cols.map(c=>h('th',{class:c[1]?'n':''},c[0]))),rows));
+  el.replaceChildren(h('div',{class:'grid'},kpi('Biten görev',num(T.done),'ilk denemede '+num(T.first_try)+(T.done?' (%'+Math.round(100*T.first_try/T.done)+')':'')),
+      kpi('Token / biten görev',T.tokens_per_done?kfmt(T.tokens_per_done):'-','toplam '+kfmt(T.tokens)),kpi('Rol çalışması',num(T.runs)),
+      kpi('BLOCKED / başarısız',num(T.failed),'',T.failed?'warn':''),kpi('Limit takılması',num(T.limit_hits)),kpi('API eşdeğeri','$'+(T.api_eq_usd||0).toFixed(2),'abonelikte fatura değildir')),
+    h('div',{class:'card'},h('h2',{},'Günlük token'),dailyChart(j.daily)),
+    h('div',{class:'card'},h('h2',{},'Profil başına kalite ve maliyet'),tbl([['Profil'],['Görev',1],['Biten',1],['İlk deneme',1],['Rework',1],['Token / biten',1],['$ / biten',1]],
+      Object.entries(j.profiles).map(([k,g])=>h('tr',{},h('td',{},h('b',{},k)),h('td',{class:'n'},g.tasks),h('td',{class:'n'},g.done),h('td',{class:'n'},g.done?Math.round(100*g.first_try/g.done)+'%':'-'),h('td',{class:'n'},g.reworks),
+        h('td',{class:'n'},g.done?kfmt(Math.round(g.tokens/g.done)):'-'),h('td',{class:'n'},g.done?(g.api_eq_usd/g.done).toFixed(2):'-'))))),
+    h('div',{class:'card'},h('h2',{},'Görev başına'),tbl([['Görev'],['Aşama'],['Çalışma',1],['Input',1],['Output',1],['Cache okuma',1],['Cache yazma',1],['Süre',1],['Rework',1],['Limit',1],['$',1]],
+      Object.entries(j.tasks).map(([k,t])=>h('tr',{},h('td',{},h('span',{class:'id'},k)),h('td',{},t.stage||'-'),h('td',{class:'n'},t.runs),h('td',{class:'n'},num(t.input)),h('td',{class:'n'},num(t.output)),h('td',{class:'n'},num(t.cache_read)),
+        h('td',{class:'n'},num(t.cache_creation)),h('td',{class:'n'},dur(t.seconds)),h('td',{class:'n'},t.rework??'-'),h('td',{class:'n'},t.limit_hits||''),h('td',{class:'n'},t.api_eq_usd.toFixed(2)))))),
+    h('div',{class:'card'},h('h2',{},'Rol · model'),tbl([['Rol · model'],['Çalışma',1],['Input',1],['Output',1],['Cache okuma',1],['$',1]],
+      Object.entries(j.role_model).map(([k,t])=>h('tr',{},h('td',{},k),h('td',{class:'n'},t.runs),h('td',{class:'n'},num(t.input)),h('td',{class:'n'},num(t.output)),h('td',{class:'n'},num(t.cache_read)),h('td',{class:'n'},t.api_eq_usd.toFixed(2)))))),
+    h('div',{class:'card'},h('h2',{},'Context Shadow Mode'),h('div',{class:'mut'},`${num(j.shadow.records)} kayıt · tahmini mevcut ${num(j.shadow.orig_tokens_est)} token · olası tasarruf ${num(j.shadow.saving_tokens_est)} token. Yalnız gözlem; istemler değişmedi.`)),
+    h('div',{class:'mut'},j.note))};
+
+/* Skills / projects / settings */
+V.skills=async(el)=>{const j=await api('/api/skills?'+P());
+  el.replaceChildren(h('div',{class:'mut',style:'margin-bottom:12px'},j.note+' Görev başına en fazla 3 öneri; Lead değerlendirir. Kritik test ve güvenlik kontrolleri skill olmasa da atlanmaz.'),
+    h('div',{class:'grid',style:'grid-template-columns:repeat(auto-fill,minmax(300px,1fr))'},j.skills.map(s=>h('div',{class:'card'},h('div',{class:'row'},h('b',{class:'grow'},s.name),
+      s.installed?h('span',{class:'chip dot c-ok'},'Claude Code\'da yüklü'):null),h('div',{class:'mut',style:'margin:6px 0 10px'},s.description),
+      h('div',{class:'row'},(s.tech||[]).map(x=>h('span',{class:'chip'},x)),h('span',{class:'grow'}),h('span',{class:'mut'},s.suggested+' kez önerildi')),
+      h('div',{class:'mut',style:'margin-top:8px'},'Tetikleyiciler: '+(s.keywords||[]).slice(0,8).join(', '))))))};
+V.projects=async(el)=>{const j=await api('/api/projects');
+  const name=h('input',{placeholder:'ad (ör. my-app)'}),root=h('input',{placeholder:'/tam/yol/proje',style:'flex:1;min-width:260px'}),init=h('input',{type:'checkbox'});
+  el.replaceChildren(h('div',{class:'grid',style:'grid-template-columns:repeat(auto-fill,minmax(300px,1fr))'},j.projects.map(p=>h('div',{class:'card'},
+      h('div',{class:'row'},h('b',{class:'grow',style:'font-size:15px'},p.name),p.onboarded?(p.runner?h('span',{class:'chip dot c-ok'},'runner online'):h('span',{class:'chip dot c-mut'},'runner offline')):h('span',{class:'chip dot c-warn'},'team init gerekli')),
+      h('div',{class:'mut',style:'margin:6px 0;word-break:break-all'},p.root),
+      p.onboarded?h('div',{class:'row'},p.git?h('span',{class:'chip'},'dal '+p.git):null,h('span',{class:'chip'},p.memory&&p.memory.indexed?num(p.memory.files)+' dosya indeksli':'hafıza yok')):null,
+      p.onboarded&&p.name!==project?h('button',{class:'btn sm',style:'margin-top:10px',on:{click:()=>{project=p.name;try{localStorage.setItem('proj',project)}catch(_){}render()}}},'Bu projeye geç'):null))),
+    h('div',{class:'card'},h('h2',{},'Proje ekle'),h('div',{class:'row'},name,root,h('label',{class:'row mut',style:'gap:7px'},init,'team init (yalnız eksik dosyalar)'),
+      h('button',{class:'btn pri',on:{click:async()=>{try{const r=await api('/api/projects',{name:name.value,root:root.value,init:init.checked});toast(r.result.split('\n')[0]);render()}catch(e){toast(e.message,true)}}}},icon('plus',2),'Ekle'))),
+    await memoryCard())};
+async function memoryCard(){if(!project)return h('div');const m=await api('/api/memory?'+P());const q=h('input',{placeholder:'Kodda / belgelerde ara…',style:'flex:1;min-width:220px'}),out=h('div');const dec=h('input',{placeholder:'Onaylı mimari karar ekle…',style:'flex:1;min-width:260px'});
+  const KIND={verified:['kaynaktan doğrulandı','c-ok'],user_decision:['kullanıcı kararı','c-run'],inference:['doğrulanmamış çıkarım','c-warn']};
+  const search=async()=>{const r=await api('/api/search?'+P()+'&q='+encodeURIComponent(q.value));out.replaceChildren(r.results.length?h('div',{class:'tl',style:'margin-top:10px'},r.results.map(x=>h('div',{class:'it c-mut'},h('b',{},x.path),h('div',{class:'mut'},x.snippet)))):h('div',{class:'empty'},'Sonuç yok'))};
+  q.addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+  return h('div',{class:'card'},h('div',{class:'row'},h('h2',{class:'grow',style:'margin:0'},'Project Memory · '+project),
+      h('button',{class:'btn sm',on:{click:async(e)=>{if(!confirm(project+' salt-okunur indekslensin mi? (.ai/memory.sqlite yazılır)'))return;e.target.disabled=true;try{const r=await api('/api/index',{project});toast(`${r.files} dosya · ${r.changed} değişti`);render()}catch(x){toast(x.message,true)}}}},'İndeksle / güncelle')),
+    h('div',{class:'mut',style:'margin:6px 0 12px'},m.indexed?`${num(m.files)} dosya · ${num(m.imports)} import · son indeks ${fmt(m.indexed)} · git ${String(m.git_rev||'').slice(0,8)}`:'Henüz indekslenmedi. İndeksleme salt-okunurdur; .env, anahtar ve oturum dosyaları dışlanır.'),
+    h('div',{class:'row'},q,h('button',{class:'btn sm',on:{click:search}},'Ara')),out,
+    (m.facts||[]).length?h('div',{},h('h3',{},'Kayıtlar'),h('div',{class:'tl'},m.facts.map(f=>{const K=KIND[f.kind]||[f.kind,'c-mut'];return h('div',{class:'it '+(f.status==='stale'?'c-warn':K[1])},h('div',{class:'row'},h('span',{class:'chip dot '+K[1]},K[0]),f.status==='stale'?h('span',{class:'chip dot c-warn'},'eski — kaynak değişti'):null,h('span',{class:'mut'},f.source_path||'')),h('div',{},f.text))}))):null,
+    h('div',{class:'row',style:'margin-top:14px'},dec,h('button',{class:'btn sm',on:{click:async()=>{try{await api('/api/facts',{project,text:dec.value});toast('Karar kaydedildi');render()}catch(e){toast(e.message,true)}}}},'Kaydet')))}
+V.settings=async(el)=>{const j=await api('/api/settings?'+P());const L=j.limits;
+  const kv=(k,v,d)=>h('div',{class:'row',style:'justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)'},h('div',{},h('div',{},k),d?h('div',{class:'mut'},d):null),h('b',{},v));
+  el.replaceChildren(h('div',{class:'grid',style:'grid-template-columns:repeat(auto-fill,minmax(340px,1fr))'},
+    h('div',{class:'card'},h('h2',{},'Genel'),kv('Yeni görev başlatma',j.paused?'Duraklatıldı':'Aktif','Pause çalışan ajanı öldürmez'),kv('Yapılandırma',h('code',{},j.config_dir)),kv('Worktree\'ler',h('code',{},j.worktrees))),
+    h('div',{class:'card'},h('h2',{},'Sınırlar'),kv('Maks. rework',L.max_reworks),kv('Aynı hata tekrarında dur',L.block_repeated_failure?'evet':'hayır'),kv('Görev süre sınırı',L.task_minutes?L.task_minutes+' dk':'kapalı','toplam rol süresi'),kv('Rol süre sınırı',L.role_minutes?L.role_minutes+' dk':'kapalı','aşılırsa rol durdurulur')),
+    h('div',{class:'card'},h('h2',{},'Modeller'),Object.entries(j.models).map(([k,v])=>kv(k,v)),h('div',{class:'mut',style:'margin-top:8px'},'complex/critical Lead girişi: lead_complex (varsayılan opus)'))),
+    h('div',{class:'card'},h('h2',{},'Runner yapılandırması'),h('pre',{},JSON.stringify(j.runner,null,2)),h('div',{class:'mut',style:'margin-top:8px'},'.ai/runner.json ve .ai/models.json dosyadan düzenlenir; arayüz salt-okunurdur.')))};
+
+/* Refresh loop: keep open <details> and scroll; skip while the user is typing. */
+const keyOf=d=>((d.querySelector('summary')||{}).textContent||'');
+async function render(){const el=document.getElementById('view');const y=window.scrollY;
+  const opened=new Map([...el.querySelectorAll('details')].map(d=>[keyOf(d),d.open]));
+  try{await chrome();if(!project&&tab!=='projects')tab='projects';nav();await V[tab](el)}catch(e){el.replaceChildren(h('div',{class:'card err'},'Hata: '+e.message))}
+  for(const d of el.querySelectorAll('details'))if(opened.has(keyOf(d)))d.open=opened.get(keyOf(d));
+  window.scrollTo(0,y);if(openTask)renderDrawer();
+  clearTimeout(timer);timer=setTimeout(tick,4000)}
+function tick(){const a=document.activeElement;if(a&&['TEXTAREA','INPUT','SELECT'].includes(a.tagName)&&(a.value||a.tagName==='SELECT')){clearTimeout(timer);timer=setTimeout(tick,4000);return}render()}
+window.addEventListener('hashchange',()=>{const t=location.hash.slice(1);if(t&&t!==tab&&V[t]){tab=t;render()}});
+render();
+</script>
+</body>
+</html>
