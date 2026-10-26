@@ -152,11 +152,13 @@ def visible(rows):
 # ---------- board ----------
 
 SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+BLOCKS = ' ▏▎▍▌▋▊▉'
+SPARKLE = '✦✧⋆✧'
 LOGO = ['   ▄▀█ █   █▀█ █▀█ █▀▀ █ █ █▀▀ █▀ ▀█▀ █▀█ ▄▀█',
         '   █▀█ █   █▄█ █▀▄ █▄▄ █▀█ ██▄ ▄█  █  █▀▄ █▀█']
 # 256-colour palette (fallback: 8 colours): name -> (256, 8)
 PALETTE = {'text': (252, 7), 'dim': (244, 7), 'faint': (238, 0), 'acc': (141, 5), 'run': (81, 6), 'ok': (114, 2),
-           'warn': (221, 3), 'bad': (203, 1), 'cmd': (110, 4), 'hot': (213, 5)}
+           'warn': (221, 3), 'bad': (203, 1), 'cmd': (110, 4), 'hot': (213, 5), 'glow': (231, 7)}
 GRADIENT = [99, 105, 111, 117, 123, 159]
 
 
@@ -165,12 +167,14 @@ class Board:
         self.scr, self.root, self.sel, self.info, self.note = scr, root, 0, False, ''
         self.rows, self.loaded, self.online, self.paused, self.quota = [], 0, None, False, {}
         self.metrics, self.metrics_key, self.log_cache = [], None, (None, [])
+        self.born, self.tween, self.seen, self.flash, self.event = time.monotonic(), {}, None, {}, None
         curses.curs_set(0); curses.use_default_colors(); scr.timeout(120)
         rich = curses.COLORS >= 256
         self.C, n = {}, 1
         for name, (c256, c8) in PALETTE.items():
             curses.init_pair(n, c256 if rich else c8, -1); self.C[name] = curses.color_pair(n); n += 1
         self.C['dim'] |= 0 if rich else curses.A_DIM
+        self.C['glow'] |= curses.A_BOLD
         self.grad = []
         for c in (GRADIENT if rich else [5, 5, 4, 4, 6, 6]):
             curses.init_pair(n, c, -1); self.grad.append(curses.color_pair(n) | curses.A_BOLD); n += 1
@@ -205,6 +209,35 @@ class Board:
     def frame(self):
         return int(time.monotonic() * 8)
 
+    def ease(self, key, target):
+        """Shown value glides a quarter of the way to target each frame, so numbers and bars animate instead of jumping."""
+        v = self.tween.get(key, 0)
+        v = target if abs(target - v) <= abs(target) * 0.002 + 0.5e-3 else v + (target - v) * 0.25
+        self.tween[key] = v
+        return v
+
+    def meter(self, y, x, frac, width, tone, sheen=False):
+        """Bar with 1/8-cell precision; sheen = a light glint sweeping the filled part (that engine is in use now)."""
+        cells = max(0.0, min(1.0, frac)) * width
+        full = int(cells)
+        text = '█' * full + (BLOCKS[int((cells - full) * 8)].strip() if full < width else '')
+        end = self.put(y, x, text, tone)
+        end = self.put(y, end, '░' * (width - len(text)), self.C['faint'])
+        k = self.frame() % (full + 16)
+        if sheen and k < full:
+            self.put(y, x + k, '█', self.C['glow'])
+        return end
+
+    def sweep(self, y, x, w, t0, attr):
+        """A highlight band crossing a row once, ~1 s after t0, without redrawing its text."""
+        p = (time.monotonic() - t0) / 1.0
+        if 0 <= p < 1:
+            a = x + int(p * (w + 8)) - 8
+            lo, hi = max(x, a), min(x + w, a + 8)
+            if hi > lo:
+                with contextlib.suppress(curses.error):
+                    self.scr.chgat(y, lo, hi - lo, attr)
+
     # ----- data -----
     def measure(self):
         """While someone watches, keep the limits live: Codex from its rollout files every 15 s, Claude via
@@ -229,18 +262,37 @@ class Board:
         self.online, self.paused = orchestra.runner_online(self.root), team.paused()
         self.quota = quota.load()
         self.measure()
+        self.notice()
         f = self.root / '.ai/metrics.jsonl'
         key = f.stat().st_mtime if f.is_file() else 0
         if key != self.metrics_key:
             self.metrics, self.metrics_key = team.load_metrics(self.root), key
+
+    def notice(self):
+        """Remember which tasks just moved: their rows flash and the footer announces it for a few seconds."""
+        now, cur = time.monotonic(), {t['id']: t for t in self.rows}
+        for i, t in cur.items():
+            old = (self.seen or {}).get(i)
+            if old is None or (old.get('stage'), old.get('status')) == (t.get('stage'), t.get('status')):
+                continue
+            self.flash[i] = now
+            if t.get('stage') == 'DONE':
+                self.event = (now, f'✦ {i} tamamlandı', 'ok')
+            elif needs_user(t) and not needs_user(old):
+                self.event = (now, f'⚑ {i} seni bekliyor', 'warn')
+            elif old.get('stage') != t.get('stage'):
+                self.event = (now, f"→ {i}  {SHORT.get(old.get('stage'), old.get('stage'))} → {SHORT.get(t.get('stage'), t.get('stage'))}", 'run')
+        self.seen = cur
 
     def today(self):
         day = time.strftime('%Y-%m-%d', time.gmtime())
         rs = [r for r in self.metrics if r.get('type') == 'run' and (r.get('ts_end') or '').startswith(day)]
         return len(rs), token_sum(rs), sum(r.get('cost_usd') or 0 for r in rs)
 
-    def tokens(self, y, x, tok, end):
+    def tokens(self, y, x, tok, end, key=None):
         """One line: full-price tokens split by kind, then cache reads (billed ~1/10); as detailed as fits before end."""
+        if key:
+            tok = {k: self.ease(f'{key}:{k}', v) for k, v in tok.items()}
         full, i, o, cw, cr = (human(v) for v in (tok['input'] + tok['output'] + tok['cache_creation'],
                                                  tok['input'], tok['output'], tok['cache_creation'], tok['cache_read']))
         for parts in ((f'tam fiyat {full}', f' (girdi {i} · çıktı {o} · önbelleğe yazma {cw})', f' + önbellek okuma {cr} (~1/10 fiyat)'),
@@ -324,17 +376,18 @@ class Board:
         cx = w - sum(len(c) + 1 for c, _ in chips) - 7
         for c, k in chips:
             self.put(0, cx, c, self.chip[k]); cx += len(c) + 1
-        self.put(0, w - 6, time.strftime('%H:%M'), self.C['dim'])
+        self.put(0, w - 6, time.strftime('%H:%M' if self.frame() // 4 % 2 else '%H %M'), self.C['dim'])
         n, tok, usd = self.today()
         x = self.put(1, 1, 'bugün ', self.C['dim'])
         x = self.put(1, x, f'{n} tur · ${usd:.2f} · ', self.C['text'])
-        self.tokens(1, x, tok, w - 1)
+        self.tokens(1, x, tok, w - 1, 'today')
 
     def limits(self, y, w):
         """Subscription windows per engine, full width: the main reason work waits."""
         h = 4
         snaps = [(e, label, quota.current(e, self.quota), (self.quota.get(e) or {}).get('at')) for e, label in (('claude', 'Claude'), ('codex', 'Codex '))]
         held = [t for t in self.rows if t.get('status') == 'WAITING_LIMIT']
+        busy = {'codex' if t.get('role') == 'verifier' else 'claude' for t in self.rows if t.get('status') == 'RUNNING'}
         self.box(y, 0, h, w - 1, 'Limitler', attr=self.C['warn'] if held else None,
                  right=f'{len(held)} görev limit bekliyor' if held else 'ölçüm token harcamaz')
         bar = max(6, (w - 96) // 2)
@@ -350,11 +403,9 @@ class Board:
                     continue
                 u, reset = c['util'], c['resets_at']
                 tone = self.C['bad'] if u >= 0.9 else self.C['warn'] if u >= 0.7 else self.C['ok']
-                filled = min(bar, round(u * bar))
                 x = self.put(yy, x, f' {name} ', self.C['dim'])
-                x = self.put(yy, x, '█' * filled, tone)
-                x = self.put(yy, x, '░' * (bar - filled), self.C['faint'])
-                x = self.put(yy, x, f' %{u * 100:<3.0f}', tone | curses.A_BOLD)
+                x = self.meter(yy, x, self.ease(engine + win, u), bar, tone, engine in busy)
+                x = self.put(yy, x, f" %{self.ease(engine + win + '%', u * 100):<3.0f}", tone | curses.A_BOLD)
                 at_ = datetime.fromtimestamp(reset) if reset else None
                 clock = (('' if win == 'five_hour' else 'Pzt Sal Çar Per Cum Cmt Paz'.split()[at_.weekday()] + ' ') + at_.strftime('%H:%M')) if at_ else ''
                 text = f'↻ {clock}' + (f' ({until(reset)})' if reset_w > 12 else '') if reset and u > 0 else ''
@@ -371,7 +422,9 @@ class Board:
                 log, lines = self.log_lines(t['id'])
                 started = log.stat().st_birthtime if log and hasattr(log.stat(), 'st_birthtime') else None
                 last = next((l for l in reversed(lines) if l.strip()), 'başlıyor…')
-                items.append(('run', t, f"{ROLE_TR.get(t['role'], t['role'] or '?')}" + (f' · {since(datetime.fromtimestamp(started, timezone.utc).isoformat())}' if started else ''), last))
+                e = int(time.time() - started) if started else None
+                clock = f'{e // 3600}:{e % 3600 // 60:02d}:{e % 60:02d}' if e and e >= 3600 else f'{e // 60}:{e % 60:02d}' if e is not None else ''
+                items.append(('run', t, f"{ROLE_TR.get(t['role'], t['role'] or '?')}" + (f' · {clock}' if clock else ''), last))
             elif t.get('status', '').startswith('WAITING_') and t.get('stage') not in team.CLOSED_STAGES:
                 when = ''
                 if t.get('retry_at'):
@@ -380,7 +433,9 @@ class Board:
                 items.append(('wait', t, self.state_text(t) + when, t.get('message') or ''))
         items = sorted(items, key=lambda i: i[0] != 'run')[:4]
         h = 2 + max(1, len(items))
-        self.box(y, 0, h, w - 1, 'Şu an', attr=self.C['run'] if any(i[0] == 'run' for i in items) else None)
+        n = len(self.grad)
+        breath = self.grad[abs(self.frame() // 2 % (2 * n - 2) - (n - 1))]
+        self.box(y, 0, h, w - 1, 'Şu an', attr=breath & ~curses.A_BOLD if any(i[0] == 'run' for i in items) else None)
         if not items:
             self.put(y + 1, 2, 'boşta — çalışan ya da bekleyen rol yok', self.C['dim'])
         for i, (kind, t, what, detail) in enumerate(items):
@@ -405,18 +460,24 @@ class Board:
                 self.put(yy, x + 1, ' ' * (w - 2), self.chip['key'])
             base = self.chip['key'] if me else 0
             g, ga = self.glyph(t)
+            fl = self.flash.get(t['id'], -1e9)
+            if t.get('stage') == 'DONE' and time.monotonic() - fl < 4:
+                g, ga = SPARKLE[self.frame() % len(SPARKLE)], self.C['ok'] | curses.A_BOLD
             cx = self.put(yy, x + 1, '▌' if me else ' ', self.C['acc'] | curses.A_BOLD)
             cx = self.put(yy, cx + 1, g, ga | (base & ~curses.A_BOLD))
             cx = self.put(yy, cx + 1, f"{t['id']:<12}", base | curses.A_BOLD if me else self.C['text'])
             a, b = self.progress(t, 8)
             pc = self.C['ok'] if t.get('stage') == 'DONE' else self.C['run'] if t.get('status') == 'RUNNING' else self.C['acc']
-            cx = self.put(yy, cx, a, pc); cx = self.put(yy, cx, b, self.C['faint'])
+            bx = self.put(yy, cx, a, pc); cx = self.put(yy, bx, b, self.C['faint'])
+            if t.get('status') == 'RUNNING' and b:
+                self.put(yy, bx + self.frame() // 2 % len(b), '━', self.C['run'] | curses.A_BOLD)
             st = self.state_text(t)[:20]
             cx = self.put(yy, cx + 1, f'{st:<20}', ga & ~curses.A_BOLD if not me else ga)
             cx = self.put(yy, cx, f"{since(t.get('updated')):>5} ", self.C['dim'])
             room = x + w - 2 - cx
             if room > 4:
                 self.put(yy, cx, (t.get('title') or '')[:room], (base if me else self.C['dim']))
+            self.sweep(yy, x + 1, w - 2, fl, self.chip['ok' if t.get('stage') == 'DONE' else 'run'])
 
     def pipeline(self, t, y, x, w):
         path = t.get('path') or []
@@ -457,7 +518,7 @@ class Board:
             self.put(y + 4, cx + 2, '— ' + t['message'][:w - (cx - x) - 6], self.C['bad'] if needs_user(t) else self.C['dim'])
         if rs:
             cx = self.put(y + 5, x + 3, f"{len(rs)} tur · {sum(r['sec'] for r in rs) / 60:.0f} dk · ${sum(r['usd'] for r in rs):.2f} · ", self.C['text'])
-            self.tokens(y + 5, cx, token_sum(rs), x + w - 2)
+            self.tokens(y + 5, cx, token_sum(rs), x + w - 2, t['id'])
         top = y + 7
         self.put(top - 1, x + 1, '─' * (w - 2), self.C['faint'])
         room = h - (top - y) - 1
@@ -509,7 +570,15 @@ class Board:
         if self.note:
             self.put(h - 1, 0, f' {self.note} '.ljust(w - 1), self.chip['warn']); return
         x = 1
+        ev = self.event
+        if ev and time.monotonic() - ev[0] < 8:
+            text = f' {ev[1]} '
+            slide = max(0, int((1 - (time.monotonic() - ev[0]) * 4) * len(text)))
+            self.put(h - 1, w - 1 - len(text) + slide, text, self.chip[ev[2]])
+            w -= len(text) + 1
         for k, label in [('↑↓', 'seç'), ('i', 'zaman/log'), ('r', 'yanıt'), ('a', 'devam'), ('c', 'iptal'), ('s', 'runner'), ('p', 'duraklat'), ('q', 'çık')]:
+            if x + len(k) + len(label) + 4 >= w:
+                break
             x = self.put(h - 1, x, f' {k} ', self.chip['acc']); x = self.put(h - 1, x, f' {label}  ', self.C['dim'])
 
     def draw(self):
@@ -517,6 +586,14 @@ class Board:
         scr = self.scr; scr.erase(); h, w = scr.getmaxyx()
         if h < 16 or w < 60:
             self.put(0, 0, 'Pencere küçük — büyüt', self.C['warn']); scr.refresh(); return
+        p = (time.monotonic() - self.born) / 0.9
+        if p < 1:  # intro: the logo wipes in left to right with a moving gradient; any key skips it
+            lw = max(map(len, LOGO))
+            for i, l in enumerate(LOGO):
+                for j, ch in enumerate(l[:int(p * 1.3 * lw)]):
+                    self.put(h // 2 - 2 + i, (w - lw) // 2 + j, ch, self.grad[(j // 3 + self.frame()) % len(self.grad)])
+            self.put(h // 2 + 1, (w - len(self.root.name)) // 2, self.root.name, self.C['dim'])
+            scr.refresh(); return
         self.header(w)
         self.sel = min(self.sel, max(0, len(self.rows) - 1))
         body_y = 2 + self.limits(2, w)
@@ -599,6 +676,7 @@ class Board:
                 if self.note and time.monotonic() - note_at > 4:
                     self.note = ''
                 continue
+            self.born = 0
             if key == 'q':
                 return
             if key != curses.KEY_RESIZE:

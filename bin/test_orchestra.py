@@ -398,6 +398,19 @@ class Tui(unittest.TestCase):
         self.assertEqual([t['id'] for t in tui.visible(rows)], ['B', 'G', 'R', 'Q', 'X', 'D0', 'D1', 'D2', 'D3'])
         self.assertFalse(tui.needs_user(rows[4]))  # a closed task's leftover gate does not wait on the user
 
+    def test_board_announces_moves_and_eases_values(self):
+        import tui
+        b = tui.Board.__new__(tui.Board)
+        b.seen, b.flash, b.event, b.tween = None, {}, None, {}
+        b.rows = [{'id': 'A', 'stage': 'TEST_CLAUDE', 'status': 'RUNNING'}]; b.notice()
+        self.assertEqual((b.flash, b.event), ({}, None))  # first look: nothing "moved"
+        b.rows = [{'id': 'A', 'stage': 'VERIFY_CODEX', 'status': 'RUNNING'}]; b.notice()
+        self.assertIn('TEST → VRFY', b.event[1]); self.assertIn('A', b.flash)
+        b.rows = [{'id': 'A', 'stage': 'DONE', 'status': 'COMPLETED'}]; b.notice()
+        self.assertEqual(b.event[2], 'ok')
+        vals = [b.ease('k', 1.0) for _ in range(40)]
+        self.assertTrue(0 < vals[0] < vals[1] < 1 and vals[-1] == 1.0)
+
 
 class Onboarding(Base):
     def test_register_names_the_folder_and_is_idempotent(self):
