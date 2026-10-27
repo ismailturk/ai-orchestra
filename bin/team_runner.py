@@ -59,6 +59,9 @@ DENY_TOOLS = ['Bash(git push:*)', 'Bash(git merge:*)', 'Bash(git rebase:*)', 'Ba
               'Bash(dotnet ef database:*)', 'Bash(dotnet ef migrations remove:*)', 'Bash(psql:*)', 'Bash(mysql:*)',
               'Bash(sqlcmd:*)', 'Bash(flutter pub publish:*)', 'Bash(dart pub publish:*)', 'Bash(npm publish:*)',
               'Bash(firebase deploy:*)', 'Bash(fastlane:*)', 'Bash(sudo:*)', 'Bash(rm -rf:*)']
+# Test runners of the supported toolchains, allowed for every project: a Tester that may build but not test
+# can only answer BLOCKED (one backend task looped 20 runs on that).
+TEST_TOOLS = ['Bash(dotnet test)', 'Bash(dotnet test *)', 'Bash(flutter test)', 'Bash(flutter test *)']
 # Both engines: every network push URL is rewritten to an unknown scheme, so `git push` fails in git itself.
 PUSH_BLOCK_PREFIXES = ('https://', 'http://', 'ssh://', 'git://', 'git@')
 
@@ -551,6 +554,13 @@ def headless_path():
     return os.pathsep.join(p for p in os.environ.get('PATH', '').split(os.pathsep) if '/cmux-cli-shims' not in p)
 
 
+def dotnet_root():
+    """Install dir of the `dotnet` on PATH. Test apphosts otherwise look only in /usr/local/share/dotnet and miss a
+    user-local SDK (~/.dotnet): every test run then fails with "runtime not found" while `dotnet build` passes."""
+    found = shutil.which('dotnet', path=headless_path() or None)
+    return str(Path(found).resolve().parent) if found else None
+
+
 def executable(name):
     found = shutil.which(name, path=headless_path() or None)
     if found:
@@ -672,7 +682,7 @@ def command_for(root, ident, state, role, prompt, run_id):
                '--exclude-dynamic-system-prompt-sections',
                # The runner's own state tool, whatever the project allow list says (an old path there
                # auto-denied every claim/advance and the role stopped without advancing).
-               '--allowedTools', f'Bash(python3 {tool} *)',
+               '--allowedTools', f'Bash(python3 {tool} *)', *TEST_TOOLS,
                '--disallowedTools', *DENY_TOOLS]
         if state.get('worktree'):
             cmd += ['--add-dir', str(root)]  # cwd is the worktree; task docs stay in the project
@@ -740,6 +750,8 @@ def run_process(root, ident, role, command, run_id,
                AI_TEAM_PROJECT=team.read(root/'.ai/project.json')['id'],
                AI_TEAM_TASK=ident, AI_TEAM_RUN_ID=run_id, AI_TEAM_ROOT=str(root))
     env['ENABLE_CLAUDEAI_MCP_SERVERS'] = 'false'  # claude.ai connectors off for runner roles
+    if not env.get('DOTNET_ROOT') and (dotnet := dotnet_root()):
+        env['DOTNET_ROOT'] = dotnet
     # team.py evidence records the real engine/model, which decides the independence label.
     env['AI_TEAM_ENGINE'], model = engine_model(role, command)
     env.pop('AI_TEAM_MODEL', None)

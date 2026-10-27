@@ -29,6 +29,14 @@ class RunnerTests(unittest.TestCase):
         iso.start(); self.addCleanup(iso.stop)
         self.root_patch.start(); self.addCleanup(self.root_patch.stop)
 
+
+    def test_dotnet_root_is_the_dotnet_on_path(self):
+        bindir = self.root / 'sdk'; bindir.mkdir()
+        (bindir / 'dotnet').write_text('#!/bin/sh\n'); (bindir / 'dotnet').chmod(0o755)
+        with patch.dict(team_runner.os.environ, {'PATH': f'{bindir}:/usr/bin'}):
+            self.assertEqual(team_runner.dotnet_root(), str(bindir.resolve()))
+        with patch.dict(team_runner.os.environ, {'PATH': '/nonexistent'}):
+            self.assertIsNone(team_runner.dotnet_root())
     def test_verifier_preflight_probes_the_toolchain_in_its_own_sandbox(self):
         cfg = {}
         self.assertIsNone(team_runner.sandbox_probe(self.root, {}))  # no Flutter/.NET project: nothing to probe

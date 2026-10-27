@@ -69,6 +69,7 @@ class Safety(Base):
         for rule in ('Bash(git push:*)', 'Bash(git merge:*)', 'Bash(dotnet ef database:*)', 'Bash(rm -rf:*)'):
             self.assertIn(rule, denied)
         self.assertNotIn('bypassPermissions', ' '.join(cmd)); self.assertNotIn('dangerously', ' '.join(cmd))
+        self.assertIn('Bash(dotnet test *)', cmd[cmd.index('--allowedTools'):i])  # every project's Tester may run its tests
 
     def test_role_env_makes_git_push_fail_inside_git(self):
         self.git('init', '-q'); self.git('remote', 'add', 'origin', 'https://example.com/r.git')

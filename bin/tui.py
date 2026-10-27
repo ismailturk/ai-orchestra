@@ -295,9 +295,9 @@ class Board:
             tok = {k: self.ease(f'{key}:{k}', v) for k, v in tok.items()}
         full, i, o, cw, cr = (human(v) for v in (tok['input'] + tok['output'] + tok['cache_creation'],
                                                  tok['input'], tok['output'], tok['cache_creation'], tok['cache_read']))
-        for parts in ((f'tam fiyat {full}', f' (girdi {i} · çıktı {o} · önbelleğe yazma {cw})', f' + önbellek okuma {cr} (~1/10 fiyat)'),
-                      (f'tam {full}', f' (girdi {i} · çıktı {o} · yazma {cw})', f' + önbellek {cr}'),
-                      (f'tam {full}', '', f' + önbellek {cr}')):
+        for parts in ((f'tam fiyat {full}', f' (input {i} · output {o} · cache write {cw})', f' + cache read {cr} (~1/10 fiyat)'),
+                      (f'tam {full}', f' (input {i} · output {o} · write {cw})', f' + cache {cr}'),
+                      (f'tam {full}', '', f' + cache {cr}')):
             if x + sum(map(len, parts)) <= end:
                 break
         for text, a in zip(parts, (self.C['hot'] | curses.A_BOLD, self.C['text'], self.C['dim'])):
@@ -544,7 +544,7 @@ class Board:
             cx = self.put(y + i, cx, '█' * n, self.C['hot']); cx = self.put(y + i, cx, '░' * (bar_w - n), self.C['faint'])
             q = r['quota']
             used = f" · {q.get('engine', '')} 5s %{q['five_hour'] * 100:.0f}" if isinstance(q.get('five_hour'), (int, float)) else ''
-            self.put(y + i, cx + 1, f"{human(r['fresh']):>6} tam · {human(r['cache']):>5} önb · {r['sec'] / 60:4.1f}dk{used}  {r['result']}", c, x + w)
+            self.put(y + i, cx + 1, f"{human(r['fresh']):>6} tam · {human(r['cache']):>5} cache · {r['sec'] / 60:4.1f}dk{used}  {r['result']}", c, x + w)
         for j, g in enumerate(gates):
             self.put(y + h - len(gates) + j, x, f"⚑ {g.get('kind')}: {g.get('action')} → {g.get('target')}  (Lead'e onay ver)", self.C['warn'] | curses.A_BOLD)
         if not rs and not gates:
