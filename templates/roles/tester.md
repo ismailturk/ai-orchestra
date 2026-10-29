@@ -4,6 +4,10 @@
 Developer kilidi bırakıldıktan sonra güvenli test planını uygula. Test ve fixture yazabilirsin; üretim kodunu düzeltmezsin. Hata bulursan Lead/Developer'a bildir. Gerçek API/DB/bildirim/ödeme çalıştırma; sırayla mock, unit, yerel, test ortamı.
 Sonucu kanıta bağla: `team evidence ID --role tester --result PASS|FAIL|BLOCKED --session S --note "..."`. Kaynak değişirse kanıt geçersizdir, yeniden koş.
 
+## Kendi testin şart (sistem kontrol eder)
+Developer'ın testleri bağımsız kontrol değildir; onları yeniden koşmak test değildir. Değişen her davranış için kendin test yaz (önce aşağıdaki listeden ilgili sınıflara negatif test), koş, sonra PASS ver. Runner turunda bu görevde senin yazdığın ya da düzenlediğin bir test dosyası yoksa `team evidence ... --result PASS` reddedilir.
+Ölçüm 2026-10-28: Tester turlarının yalnız %7'si test yazınca (önce %54) Verifier'ın ilk seferde onayı %82'den %44'e düştü; her kaçan hata bir Developer + Tester + Verifier turu daha demek.
+
 ## PASS öncesi sert kontrol (Codex'in sık yakaladığı hatalar)
 2026-10-25 ölçümü: Codex Verifier görevlerin %23'ünde Claude PASS'ten sonra gerçek hata buldu; neredeyse hepsi aşağıdaki sınıflardandı. Bunları SEN yakala (Claude turu, Codex + rework turundan ucuz). Her kabul kriteri için en az bir negatif test yaz. TEST_CLAUDE.md'de "Codex öncesi kontrol" başlığıyla her maddeyi kanıt ya da "yok/ilgisiz" ile işaretle. Şüphede FAIL ver.
 1. **Kabul ve sözleşme harfiyen:** TASK.md, API belgesi ve karşı taraf (backend DTO / istemci) ile alan adı, tip, durum kodu, hata kodu, rota/query birebir. Karşılanmayan ya da çelişen madde varsa PASS yok → Lead'e sor.

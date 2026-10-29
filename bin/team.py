@@ -706,6 +706,25 @@ INDEPENDENCE_LABELS={'independent':'PASS/PASS (bağımsız)','single-model':'PAS
 def pass_label(s, engines=None):
     return INDEPENDENCE_LABELS[independence(s,engines)]
 
+# Test files by convention in the supported stacks (Flutter/Dart, .NET, Python, JS).
+TEST_PATH=re.compile(r'(^|/)(test|tests|integration_test|__tests__|spec)/|_test\.(dart|py|go)$|Tests?\.cs$|\.(test|spec)\.[jt]sx?$')
+
+def tester_tests(root, ident):
+    """Test files the Tester role itself wrote or edited in any run of this task, read from its runner logs.
+    Measured 2026-10-28: after Developer started writing tests, Tester re-ran those and passed in ~1 min;
+    only 7% of its runs wrote a test (54% before) and Verifier's first-pass rate fell from 82% to 44%."""
+    files=set()
+    for log in (root/'.ai'/'runner-logs'/ident).glob('tester-*.log'):
+        for line in log.read_text(errors='replace').splitlines():
+            if '"tool_use"' not in line: continue
+            try: content=(json.loads(line).get('message') or {}).get('content') or []
+            except (ValueError,AttributeError): continue
+            for c in content if isinstance(content,list) else []:
+                if isinstance(c,dict) and c.get('type')=='tool_use' and c.get('name') in ('Write','Edit','MultiEdit'):
+                    path=str((c.get('input') or {}).get('file_path') or '')
+                    if TEST_PATH.search(path): files.add(path)
+    return files
+
 def evidence(root, p, s, role, result, session, note, engine=None, model=None):
     required={'tester':('TEST_CLAUDE','TEST_CLAUDE.md','claude_test'),
               'verifier':('VERIFY_CODEX','VERIFY_CODEX.md','codex_verify')}
@@ -715,6 +734,10 @@ def evidence(root, p, s, role, result, session, note, engine=None, model=None):
     report=(p/filename).read_text()
     if 'STATUS: NOT_RUN' in report or len(report.strip()) < 120:
         raise ValueError('Replace NOT_RUN and write commands, results, environment and limitations first.')
+    # A runner Tester's PASS needs its own tests; Developer's tests are not an independent check.
+    if role=='tester' and result=='PASS' and os.environ.get('AI_TEAM_RUN_ID') and not tester_tests(root,s['task']):
+        raise ValueError("Tester PASS needs tests you wrote for this task (Developer's tests do not count): "
+                         'write negative tests for the changed behaviour (roles/tester.md checklist), run them, then record PASS.')
     scope=task_scope(p); src=task_sources(root,s)
     fingerprint=snapshot(root,scope=scope,sources=src)
     production=production_snapshot(root,scope,src)

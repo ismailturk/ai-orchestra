@@ -95,6 +95,8 @@ elif role == 'tester' and mode == 'fail':
     team('rework', ident, '--reason', os.environ.get('FAKE_FAIL_REASON') or 'fake test failure ' + run)
 elif role == 'tester':
     (src / 'test').mkdir(exist_ok=True); (src / 'test' / f'{ident}_test.txt').write_text('tester test\n')
+    out({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Write',
+         'input': {'file_path': str(src / 'test' / f'{ident}_test.txt')}}]}})  # the runner log shows the Tester wrote a test
     (task / 'TEST_CLAUDE.md').write_text(report('PASS'))
     team('evidence', ident, '--role', 'tester', '--result', 'PASS', '--session', run, '--note', 'fake pass')
     team('advance', ident, nxt)

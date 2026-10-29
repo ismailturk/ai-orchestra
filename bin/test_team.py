@@ -76,6 +76,18 @@ class TeamTests(unittest.TestCase):
         self.s['stage']='TEST_CLAUDE'
         with self.assertRaises(ValueError):team.evidence(self.root,self.p,self.s,'tester','PASS','claude-1','none')
 
+    def test_runner_tester_pass_needs_its_own_test(self):
+        self.s['stage']='TEST_CLAUDE'
+        with patch.dict(team.os.environ,{'AI_TEAM_RUN_ID':'r1'}):
+            with self.assertRaisesRegex(ValueError,'Tester PASS needs tests'):self.pass_report('tester','claude-1')
+            logs=self.root/'.ai/runner-logs/DEMO-001';logs.mkdir(parents=True)
+            write=lambda path:json.dumps({'type':'assistant','message':{'content':[{'type':'tool_use','name':'Write','input':{'file_path':path}}]}})
+            (logs/'tester-r0.log').write_text(write('/w/lib/screen.dart')+'\n')  # production code is not a test
+            with self.assertRaises(ValueError):self.pass_report('tester','claude-1')
+            (logs/'tester-r1.log').write_text(write('/w/test/tester_demo_001_test.dart')+'\n')
+            self.pass_report('tester','claude-1')
+        self.assertEqual(self.s['claude_test']['result'],'PASS')
+
     def test_same_session_not_independent(self):
         self.s['stage']='TEST_CLAUDE';self.pass_report('tester','same')
         team.advance(self.root,self.p,self.s,'VERIFY_CODEX')
